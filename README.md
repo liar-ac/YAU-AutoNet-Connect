@@ -11,7 +11,7 @@
 [![Dr.COM](https://img.shields.io/badge/Dr.COM-ePortal-FF6B00?style=for-the-badge)]()
 [![DPAPI](https://img.shields.io/badge/DPAPI-密码加密-2EA44F?style=for-the-badge&logo=letsencrypt&logoColor=white)]()
 [![PyInstaller](https://img.shields.io/badge/PyInstaller-单文件打包-3572A5?style=for-the-badge)](campus_auto_login.spec)
-[![License](https://img.shields.io/badge/License-未指定-灰色?style=for-the-badge)](#许可证)
+[![License](https://img.shields.io/badge/License-MIT-00A86B?style=for-the-badge)](LICENSE)
 
 <p>
 <a href="#快速开始">快速开始</a> ·
@@ -34,7 +34,7 @@ YAU-AutoNet-Connect 是一个面向延安大学校园网的自动登录工具，
 | 组件 | 说明 |
 |---|---|
 | `campus_auto_login.py` | Python 主程序，支持托盘后台运行、日志窗口、开机自启 |
-| `campus_auto_login.ps1` | PowerShell 版本，功能对等 |
+| `campus_auto_login.ps1` | PowerShell 兼容版本，支持初始化、检测、单次登录和持续监控 |
 | `campus_auto_login.spec` | PyInstaller 打包配置，已排除不必要依赖以压缩体积 |
 | `watch_build.py` | 开发用，监听代码变更自动重新打包 |
 
@@ -244,6 +244,13 @@ python watch_build.py
 
 欢迎提交 Issue 和 Pull Request，详见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
+## 联系作者
+
+| 方式 | 信息 |
+|---|---|
+| QQ | 3291890183 |
+| 邮箱 | [yuhaohu05@163.com](mailto:yuhaohu05@163.com) |
+
 ## 许可证
 
-目前未指定许可证，需要维护者选择。
+本项目采用 MIT License 开源，详见 [LICENSE](LICENSE)。
