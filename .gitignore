@@ -1,11 +1,30 @@
+# 配置文件（含加密密码）
 campus_login.config.json
 campus_login_py.config.json
+
+# 日志文件
 campus_auto_login.log
 campus_auto_login_py.log
-.playwright-cli/
+*.log.old
+
+# Python
 __pycache__/
-*.har
+*.pyc
+*.pyo
+
+# PyInstaller
 build/
 dist/
 *.spec
+
+# 开发工具
+.playwright-cli/
 .claude/
+
+# 数据文件
+*.har
+
+# 系统文件
+Thumbs.db
+Desktop.ini
+.DS_Store

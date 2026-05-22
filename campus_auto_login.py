@@ -144,6 +144,14 @@ def write_log(log_path, message):
     with _log_lock:
         print(line)
         log_path.parent.mkdir(parents=True, exist_ok=True)
+        # 日志轮转：超过 1MB 时归档为 .old
+        try:
+            if log_path.exists() and log_path.stat().st_size > 1_048_576:
+                old = log_path.with_suffix(".log.old")
+                old.unlink(missing_ok=True)
+                log_path.rename(old)
+        except OSError:
+            pass
         with log_path.open("a", encoding="utf-8") as f:
             f.write(line + "\n")
     try:
@@ -190,7 +198,7 @@ def invoke_jsonp(portal_base, path, params=None, timeout=10, force_trailing_lang
     return jsonp_to_obj(content)
 
 
-def invoke_url_jsonp(url_base, params=None, timeout=10, force_trailing_lang=False):
+def invoke_url_jsonp(url_base, params=None, timeout=10, force_trailing_lang=False, portal_base=None):
     params = list(params or [])
     keys = {k for k, _ in params}
     callback = "dr{0}".format(random.randint(100000, 999999))
@@ -202,12 +210,13 @@ def invoke_url_jsonp(url_base, params=None, timeout=10, force_trailing_lang=Fals
     if force_trailing_lang or "lang" not in keys:
         all_params.append(("lang", "zh"))
     url = "{0}?{1}".format(url_base, query_string(all_params))
+    referer = (portal_base or DEFAULT_PORTAL).rstrip("/") + "/"
     req = request.Request(
         url,
         headers={
             "User-Agent": "Mozilla/5.0 Windows NT 10.0 Win64 x64 campus-auto-login-python",
             "Accept": "*/*",
-            "Referer": DEFAULT_PORTAL.rstrip("/") + "/",
+            "Referer": referer,
         },
     )
     with request.urlopen(req, timeout=timeout) as resp:
@@ -346,6 +355,7 @@ def login_once(config, args):
                 params,
                 timeout=12,
                 force_trailing_lang=True,
+                portal_base=config["portal_base"],
             )
             result_value = result.get("result")
             if result_value == 1 or str(result_value).lower() in {"1", "ok"}:
@@ -614,15 +624,10 @@ def run_tray_mode(args):
 
 
 def main():
-    if not check_single_instance():
-        ctypes.windll.user32.MessageBoxW(
-            0, "校园网自动登录已在运行中，请勿重复启动。", "Campus Auto Login", 0x40
-        )
-        return 0
-
     args = parse_args()
     requested_interval = args.interval
     args.interval = normalize_interval(args.interval)
+
     if args.init:
         init_config(args)
         if not args.once and not args.check and not args.tray:
@@ -640,6 +645,11 @@ def main():
         args.tray = True
 
     if args.tray:
+        if not check_single_instance():
+            ctypes.windll.user32.MessageBoxW(
+                0, "校园网自动登录已在运行中，请勿重复启动。", "Campus Auto Login", 0x40
+            )
+            return 0
         run_tray_mode(args)
         return 0
 
