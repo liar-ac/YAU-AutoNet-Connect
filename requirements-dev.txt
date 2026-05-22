@@ -1,3 +1,4 @@
 -r requirements.txt
 pyinstaller>=5.0
 watchdog>=2.0
+pytest>=7.0

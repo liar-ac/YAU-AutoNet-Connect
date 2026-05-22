@@ -114,6 +114,9 @@ exe 和 Python 脚本均支持以下命令：
 ### exe 命令
 
 ```powershell
+# 查看版本
+.\campus_auto_login.exe --version
+
 # 初始化配置（首次使用必须）
 .\campus_auto_login.exe --init
 
@@ -136,6 +139,7 @@ exe 和 Python 脚本均支持以下命令：
 ### Python 脚本命令
 
 ```powershell
+python .\campus_auto_login.py --version
 python .\campus_auto_login.py --init
 python .\campus_auto_login.py --check
 python .\campus_auto_login.py --once
