@@ -1,0 +1,11 @@
+campus_login.config.json
+campus_login_py.config.json
+campus_auto_login.log
+campus_auto_login_py.log
+.playwright-cli/
+__pycache__/
+*.har
+build/
+dist/
+*.spec
+.claude/
