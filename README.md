@@ -226,6 +226,18 @@ python watch_build.py
 
 ---
 
+## 已知限制
+
+| 限制 | 说明 |
+|---|---|
+| 仅限 Windows | 依赖 Windows DPAPI 和注册表，不支持 macOS / Linux |
+| 单网关 | 默认只支持 `http://10.200.84.3`，多网关需手动指定 `--portal-base` |
+| 单用户单机 | DPAPI 加密绑定当前 Windows 用户，换用户或换机需重新 `--init` |
+| PowerShell 版无托盘 | PowerShell 版不支持系统托盘、日志窗口和开机自启菜单 |
+| 日志无远程上报 | 日志仅写入本地文件，不支持远程查看或上报 |
+
+---
+
 ## 故障排除
 
 | 问题 | 解决方法 |

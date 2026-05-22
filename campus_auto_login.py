@@ -18,6 +18,7 @@ from urllib.error import HTTPError, URLError
 
 
 DEFAULT_PORTAL = "http://10.200.84.3"
+__version__ = "1.0.1"
 
 
 def app_base_dir():
@@ -397,6 +398,7 @@ def check_only(args):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Campus network auto login for Dr.COM portal.")
+    parser.add_argument("--version", action="version", version="campus_auto_login {0}".format(__version__))
     parser.add_argument("--init", action="store_true", help="Create encrypted config.")
     parser.add_argument("--once", action="store_true", help="Check once and login if offline.")
     parser.add_argument("--check", action="store_true", help="Only check portal status.")

@@ -7,7 +7,7 @@ on:
     branches: [master]
 
 jobs:
-  syntax-check:
+  check:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -16,8 +16,14 @@ jobs:
         with:
           python-version: '3.9'
 
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
       - name: Check Python syntax
         run: python -m py_compile campus_auto_login.py
 
       - name: Check watch_build syntax
         run: python -m py_compile watch_build.py
+
+      - name: Run tests
+        run: python -m pytest test_campus_auto_login.py -v
