@@ -110,6 +110,20 @@ def fetch_text_with_retry(url, headers=None, timeout=10, retries=None):
     raise last_exc
 
 
+def ensure_process_proxy_bypass_for_portal(portal_hosts=None):
+    """Add portal hosts to NO_PROXY env var for this process only.
+    Does NOT modify Windows system proxy or registry."""
+    if portal_hosts is None:
+        portal_hosts = ["10.200.84.3", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+    extra = ",".join(portal_hosts + ["localhost", "127.0.0.1"])
+    for var in ("NO_PROXY", "no_proxy"):
+        existing = os.environ.get(var, "")
+        if existing:
+            os.environ[var] = existing + "," + extra
+        else:
+            os.environ[var] = extra
+
+
 def app_base_dir():
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
@@ -660,50 +674,56 @@ def _get_gateway_subnet_candidates(gateway, count=5):
 
 def discover_portal_base(configured_portal_base, timeout=3, log_fn=None):
     """Discover the campus portal base URL.
-    Tries: configured value -> NCSI probes -> gateway subnet candidates.
+    Priority: configured portal -> DEFAULT_PORTAL -> gateway subnet -> NCSI redirects.
     Returns the working portal base URL, or the configured one if nothing found.
     """
     def _log(msg):
         if log_fn:
             log_fn(msg)
 
-    # 1. Try the configured portal
     configured = configured_portal_base.rstrip("/")
+
+    # 1. Try configured portal
     if _test_portal_candidate(configured, timeout=timeout):
         _log("Portal confirmed: {0}".format(configured))
         return configured
 
-    _log("Configured portal {0} not reachable, attempting auto-discovery...".format(configured))
+    _log("Portal {0} not reachable, trying candidates...".format(configured))
 
-    # 2. Try NCSI probe URLs to detect captive portal redirect
+    # 2. Try DEFAULT_PORTAL if different from configured
+    default = DEFAULT_PORTAL.rstrip("/")
+    if default != configured and _test_portal_candidate(default, timeout=timeout):
+        _log("Portal confirmed via default: {0}".format(default))
+        return default
+
+    # 3. Try gateway subnet (local, no internet needed)
+    gateway = _get_default_gateway()
+    if gateway:
+        for candidate in _get_gateway_subnet_candidates(gateway):
+            if candidate.rstrip("/") in (configured, default):
+                continue
+            if _test_portal_candidate(candidate, timeout=timeout):
+                _log("Discovered portal via gateway subnet: {0}".format(candidate))
+                return candidate
+
+    # 4. NCSI redirects (requires some network access, may fail without internet)
     for probe_url in _NCSI_PROBE_URLS:
         try:
             status, reason, headers, body = fetch_direct_raw(
                 probe_url,
-                headers={"User-Agent": "Mozilla/5.0 Windows NT 10.0 Win64 x64 campus-auto-login-discovery"},
-                timeout=timeout,
+                headers={"User-Agent": "Mozilla/5.0 campus-auto-login-discovery"},
+                timeout=2,
             )
             location = headers.get("Location") or headers.get("location", "")
             if location:
                 candidate = _extract_portal_from_url(location)
-                if candidate and _test_portal_candidate(candidate, timeout=timeout):
-                    _log("Auto-discovered portal via redirect from {0}: {1}".format(probe_url, candidate))
-                    return candidate
+                if candidate and candidate.rstrip("/") not in (configured, default):
+                    if _test_portal_candidate(candidate, timeout=timeout):
+                        _log("Discovered portal via redirect: {0}".format(candidate))
+                        return candidate
         except Exception:
             continue
 
-    # 3. Try default gateway and nearby IPs
-    gateway = _get_default_gateway()
-    if gateway:
-        _log("Default gateway: {0}, probing subnet...".format(gateway))
-        for candidate in _get_gateway_subnet_candidates(gateway):
-            if candidate.rstrip("/") == configured:
-                continue  # already tried
-            if _test_portal_candidate(candidate, timeout=timeout):
-                _log("Auto-discovered portal via gateway subnet: {0}".format(candidate))
-                return candidate
-
-    _log("Auto-discovery failed, using configured portal: {0}".format(configured))
     return configured
 
 
@@ -738,34 +758,48 @@ def _check_proxy_env():
     return False
 
 
-def _get_active_ipv4():
-    """Get the active IPv4 address from the WLAN adapter (best-effort)."""
+def _get_portal_route_info(portal_host):
+    """Get the network route/interface used to reach the portal host.
+    Returns dict with ifIndex, alias, sourceIP, nextHop, metric."""
+    result = {"ifIndex": None, "alias": None, "sourceIP": None, "nextHop": None, "metric": None}
+    # Use route print (always available on Windows)
     try:
-        output = os.popen("ipconfig").read(4096)
-        # Look for WLAN section and its IPv4 address
-        in_wlan = False
-        for line in output.splitlines():
-            if "WLAN" in line or "Wi-Fi" in line or "Wireless" in line:
-                in_wlan = True
-            elif in_wlan and ("IPv4" in line or "IP Address" in line):
-                parts = line.split(":")
-                if len(parts) >= 2:
-                    addr = parts[1].strip().rstrip(".")
-                    if addr and not addr.startswith("169.254"):
-                        return addr
-            elif in_wlan and line.strip() == "":
-                in_wlan = False
-        # Fallback: get any non-loopback IPv4
-        for line in output.splitlines():
-            if ("IPv4" in line or "IP Address" in line) and "127.0.0.1" not in line:
-                parts = line.split(":")
-                if len(parts) >= 2:
-                    addr = parts[1].strip().rstrip(".")
-                    if addr and not addr.startswith("169.254"):
-                        return addr
+        route_out = os.popen("route print {0}".format(portal_host)).read(2048)
+        in_active = False
+        for line in route_out.splitlines():
+            if "Active Routes" in line:
+                in_active = True
+                continue
+            if in_active:
+                parts = line.split()
+                if len(parts) >= 5:
+                    dest, mask, gw, iface, metric = parts[0], parts[1], parts[2], parts[3], parts[4]
+                    if dest == portal_host or dest == "0.0.0.0":
+                        result["nextHop"] = gw
+                        result["sourceIP"] = iface
+                        result["metric"] = metric
+                        break
+                if line.strip() == "":
+                    in_active = False
     except Exception:
         pass
-    return "unknown"
+    # Try to get interface alias via PowerShell (best-effort)
+    if result["sourceIP"]:
+        try:
+            ps_out = os.popen(
+                'powershell.exe -NoProfile -Command "'
+                'Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.IPAddress -eq \'' + result["sourceIP"] + '\'} | '
+                'Select-Object -First 1 | ForEach-Object { \'%s|%s|%s\' -f $_.InterfaceIndex, $_.InterfaceAlias, $_.IPAddress }"'
+                '"' % result["sourceIP"]
+            ).read(512).strip()
+            if ps_out and "|" in ps_out:
+                parts = ps_out.split("|")
+                if len(parts) >= 2:
+                    result["ifIndex"] = parts[0].strip()
+                    result["alias"] = parts[1].strip()
+        except Exception:
+            pass
+    return result
 
 
 def _get_proxy_details():
@@ -792,22 +826,35 @@ def _get_proxy_details():
         return "", ""
 
 
+_VIRTUAL_KEYWORDS = [
+    "clash", "meta", "mihomo", "tun", "tap", "wintun", "wireguard",
+    "vpn", "virtual", "vmware", "virtualbox", "hyper-v",
+    "netease", "uu", "sstap", "sectap", "secitap",
+]
+
+
 def _detect_virtual_adapters():
-    """Detect TUN/TAP/virtual network adapters (read-only)."""
-    keywords = ["tun", "tap", "wintun", "clash", "meta", "wireguard", "vpn", "sstap", "secitap", "netease uu"]
+    """Detect virtual/TUN/TAP adapters via Get-NetAdapter (read-only).
+    Returns list of (Name, InterfaceDescription, Status, ifIndex) tuples."""
     found = []
     try:
-        output = os.popen("ipconfig /all").read(16384)
-        current_adapter = ""
+        output = os.popen(
+            'powershell.exe -NoProfile -Command "'
+            'Get-NetAdapter | Select-Object Name, InterfaceDescription, Status, ifIndex | '
+            'ForEach-Object { \'{0}|{1}|{2}|{3}\' -f $_.Name, $_.InterfaceDescription, $_.Status, $_.ifIndex }"'
+        ).read(8192).strip()
         for line in output.splitlines():
-            if line and not line.startswith(" ") and "adapter" in line.lower():
-                current_adapter = line.strip()
-            elif current_adapter:
-                lower = current_adapter.lower()
-                for kw in keywords:
-                    if kw in lower and current_adapter not in found:
-                        found.append(current_adapter)
-                        break
+            if not line or "|" not in line:
+                continue
+            parts = line.split("|", 3)
+            if len(parts) < 4:
+                continue
+            name, desc, status, ifidx = parts[0].strip(), parts[1].strip(), parts[2].strip(), parts[3].strip()
+            combined = (name + " " + desc).lower()
+            for kw in _VIRTUAL_KEYWORDS:
+                if kw in combined:
+                    found.append((name, desc, status, ifidx))
+                    break
     except Exception:
         pass
     return found
@@ -827,47 +874,59 @@ def diagnose_portal_connectivity(portal_base, timeout=3, log_fn=None):
     lines.append("Status URL: {0}/drcom/chkstatus".format(portal_base.rstrip("/")))
     lines.append("Login URL: {0}://{1}:801/eportal/portal/login".format(scheme, host))
 
-    # Active IPv4
-    active_ip = _get_active_ipv4()
-    lines.append("Active IPv4: {0}".format(active_ip))
+    # Portal route info (the CORRECT interface for reaching the portal)
+    route_info = _get_portal_route_info(host)
+    lines.append("Portal route interface: {0} (ifIndex={1})".format(
+        route_info.get("alias") or "unknown", route_info.get("ifIndex") or "?"))
+    lines.append("Portal route source IPv4: {0}".format(route_info.get("sourceIP") or "unknown"))
+    lines.append("Portal route next hop: {0}".format(route_info.get("nextHop") or "unknown"))
+    lines.append("Portal route metric: {0}".format(route_info.get("metric") or "unknown"))
 
     # Default gateway
     gw = _get_default_gateway()
     lines.append("Default gateway: {0}".format(gw or "unknown"))
 
-    # Best route to portal
-    try:
-        route_output = os.popen("route print {0}".format(host)).read(1024)
-        route_lines = [l for l in route_output.splitlines() if host in l or "0.0.0.0" in l]
-        if route_lines:
-            lines.append("Route entries: {0}".format("; ".join(route_lines[:3])))
-        else:
-            lines.append("Route entries: none specific (using default)")
-    except Exception:
-        lines.append("Route entries: unavailable")
+    # Warn if route source looks like virtual adapter
+    src_ip = route_info.get("sourceIP") or ""
+    if src_ip.startswith("192.168.144.") or src_ip.startswith("192.168.56.") or src_ip.startswith("172.16."):
+        lines.append("WARNING: Portal route source IPv4 may belong to a virtual/host-only adapter.")
 
     # Virtual adapters
     vnet = _detect_virtual_adapters()
     if vnet:
-        lines.append("Virtual/TUN adapters detected: {0}".format(", ".join(vnet)))
+        for name, desc, status, ifidx in vnet:
+            lines.append("Virtual adapter: {0} ({1}) [{2}] ifIndex={3}".format(name, desc, status, ifidx))
     else:
-        lines.append("Virtual/TUN adapters detected: none")
+        lines.append("Virtual adapters: none detected")
 
     # Socket test port 80
     try:
         sock = socket.create_connection((host, port), timeout=timeout)
         sock.close()
-        lines.append("Socket {0}:{1}: SUCCESS".format(host, port))
+        lines.append("Raw socket {0}:{1}: SUCCESS".format(host, port))
     except OSError as exc:
-        lines.append("Socket {0}:{1}: FAIL - {2}".format(host, port, exc))
+        lines.append("Raw socket {0}:{1}: FAIL - {2}".format(host, port, exc))
 
     # Socket test port 801
     try:
         sock = socket.create_connection((host, 801), timeout=timeout)
         sock.close()
-        lines.append("Socket {0}:801: SUCCESS".format(host))
+        lines.append("Raw socket {0}:801: SUCCESS".format(host))
     except OSError as exc:
-        lines.append("Socket {0}:801: FAIL - {1}".format(host, exc))
+        lines.append("Raw socket {0}:801: FAIL - {1}".format(host, exc))
+
+    # Raw direct HTTP status check
+    try:
+        text = fetch_direct_text(
+            "{0}/drcom/chkstatus?callback=_diag&jsVersion=4.X&v=1&lang=zh".format(portal_base.rstrip("/")),
+            headers={"User-Agent": "Mozilla/5.0 campus-auto-login-diag"},
+            timeout=timeout,
+        )
+        obj = jsonp_to_obj(text)
+        result_val = obj.get("result", "?")
+        lines.append("Raw direct HTTP status: result={0} (SUCCESS)".format(result_val))
+    except Exception as exc:
+        lines.append("Raw direct HTTP status: FAIL - {0}".format(exc))
 
     # Proxy details
     proxy_server, proxy_override = _get_proxy_details()
@@ -881,7 +940,6 @@ def diagnose_portal_connectivity(portal_base, timeout=3, log_fn=None):
     for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
         val = os.environ.get(name, "")
         if val:
-            # Show only host:port, not full URL with credentials
             try:
                 p = parse.urlsplit(val)
                 proxy_env_vals.append("{0}={1}:{2}".format(name, p.hostname, p.port))
@@ -891,6 +949,11 @@ def diagnose_portal_connectivity(portal_base, timeout=3, log_fn=None):
         lines.append("Proxy env vars: {0}".format(", ".join(proxy_env_vals)))
     else:
         lines.append("Proxy env vars: none")
+
+    # NO_PROXY check
+    no_proxy = os.environ.get("NO_PROXY") or os.environ.get("no_proxy") or ""
+    has_portal_in_noproxy = "10." in no_proxy or "10.200.84.3" in no_proxy
+    lines.append("NO_PROXY includes portal subnet: {0}".format("YES" if has_portal_in_noproxy else "NO"))
 
     lines.append("--- End Diagnostic ---")
 
@@ -1152,6 +1215,9 @@ def main():
     args = parse_args()
     requested_interval = args.interval
     args.interval = normalize_interval(args.interval)
+
+    # Ensure portal hosts bypass any system proxy at the process level
+    ensure_process_proxy_bypass_for_portal()
 
     if args.init:
         init_config(args)

@@ -1,0 +1,66 @@
+# -*- mode: python ; coding: utf-8 -*-
+# CLI version with console=True for --diagnose and --once output
+
+_EXCLUDES = [
+    'numpy',
+    'PIL.BlpImagePlugin', 'PIL.BufrStubImagePlugin', 'PIL.CurImagePlugin',
+    'PIL.DcxImagePlugin', 'PIL.DdsImagePlugin', 'PIL.EpsImagePlugin',
+    'PIL.FitsStubImagePlugin', 'PIL.FliImagePlugin', 'PIL.FpxImagePlugin',
+    'PIL.FtexImagePlugin', 'PIL.GbrImagePlugin', 'PIL.GifImagePlugin',
+    'PIL.GribStubImagePlugin', 'PIL.Hdf5StubImagePlugin', 'PIL.IcnsImagePlugin',
+    'PIL.ImImagePlugin', 'PIL.ImtImagePlugin',
+    'PIL.IptcImagePlugin', 'PIL.Jpeg2KImagePlugin', 'PIL.JpegImagePlugin',
+    'PIL.JpegPresets', 'PIL.McIdasImagePlugin', 'PIL.MicImagePlugin',
+    'PIL.MpegImagePlugin', 'PIL.MpoImagePlugin', 'PIL.MspImagePlugin',
+    'PIL.PalmImagePlugin', 'PIL.PcdImagePlugin',
+    'PIL.PcxImagePlugin', 'PIL.PdfImagePlugin', 'PIL.PdfParser',
+    'PIL.PixarImagePlugin', 'PIL.PpmImagePlugin',
+    'PIL.PsdImagePlugin', 'PIL.QoiImagePlugin', 'PIL.SgiImagePlugin',
+    'PIL.SpiderImagePlugin', 'PIL.SunImagePlugin', 'PIL.TgaImagePlugin',
+    'PIL.TiffImagePlugin', 'PIL.WebPImagePlugin',
+    'PIL.WmfImagePlugin', 'PIL.XVThumbImagePlugin', 'PIL.XbmImagePlugin',
+    'PIL.XpmImagePlugin',
+    'unittest', 'pydoc', 'doctest',
+    'tkinter.ttk', 'tkinter.messagebox', 'tkinter.filedialog',
+    'tkinter.colorchooser', 'tkinter.commondialog', 'tkinter.simpledialog',
+    'tkinter.font',
+    'logging.config', 'logging.handlers',
+    'distutils', 'setuptools', 'pkg_resources',
+    'multiprocessing', 'concurrent',
+]
+
+a = Analysis(
+    ['campus_auto_login.py'],
+    pathex=[],
+    binaries=[],
+    datas=[],
+    hiddenimports=['pystray', 'pystray._win32', 'PIL', 'PIL.Image', 'PIL.ImageDraw', 'tkinter', 'tkinter.scrolledtext'],
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=_EXCLUDES,
+    noarchive=False,
+    optimize=0,
+)
+pyz = PYZ(a.pure)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    a.binaries,
+    a.datas,
+    [],
+    name='campus_auto_login_cli',
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    runtime_tmpdir=None,
+    console=True,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+)

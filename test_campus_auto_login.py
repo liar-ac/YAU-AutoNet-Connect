@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Lightweight tests for campus_auto_login (no network required)."""
 import json
+import os
 import unittest
 from unittest.mock import MagicMock, patch, call
 
@@ -10,6 +11,7 @@ from campus_auto_login import (
     client_info_from_status,
     diagnose_portal_connectivity,
     discover_portal_base,
+    ensure_process_proxy_bypass_for_portal,
     eportal_login_url,
     fetch_direct_text,
     fetch_direct_raw,
@@ -25,6 +27,7 @@ from campus_auto_login import (
     wait_for_portal_ready,
     __version__,
     _extract_portal_from_url,
+    _get_portal_route_info,
     _is_socket_unreachable_error,
     _test_portal_candidate,
     _get_default_gateway,
@@ -235,22 +238,27 @@ class TestInvokeJsonpUsesFetchDirect(unittest.TestCase):
 
 
 class TestDiagnosePortalConnectivity(unittest.TestCase):
-    def test_returns_lines(self):
-        with patch("campus_auto_login.socket.create_connection") as mock_sock, \
-             patch("campus_auto_login._check_system_proxy_enabled", return_value=False), \
-             patch("campus_auto_login._check_proxy_env", return_value=False):
-            mock_sock.return_value = MagicMock()
-            lines = diagnose_portal_connectivity("http://10.200.84.3")
-            self.assertTrue(len(lines) > 5)
-            self.assertTrue(any("Portal host" in l for l in lines))
-            self.assertTrue(any("Socket" in l for l in lines))
+    @patch("campus_auto_login._detect_virtual_adapters", return_value=[])
+    @patch("campus_auto_login._get_portal_route_info")
+    @patch("campus_auto_login.socket.create_connection")
+    @patch("campus_auto_login.fetch_direct_text")
+    def test_returns_lines(self, mock_fetch, mock_sock, mock_route, mock_vnet):
+        mock_sock.return_value = MagicMock()
+        mock_route.return_value = {"ifIndex": "6", "alias": "WLAN", "sourceIP": "10.211.223.248", "nextHop": "10.211.0.1", "metric": "0"}
+        mock_fetch.return_value = 'cb({"result":1})'
+        lines = diagnose_portal_connectivity("http://10.200.84.3")
+        self.assertTrue(len(lines) > 5)
+        self.assertTrue(any("Portal host" in l for l in lines))
+        self.assertTrue(any("Raw socket" in l for l in lines))
 
-    def test_socket_fail_shown(self):
-        with patch("campus_auto_login.socket.create_connection", side_effect=OSError("test error")), \
-             patch("campus_auto_login._check_system_proxy_enabled", return_value=False), \
-             patch("campus_auto_login._check_proxy_env", return_value=False):
-            lines = diagnose_portal_connectivity("http://10.200.84.3")
-            self.assertTrue(any("FAIL" in l for l in lines))
+    @patch("campus_auto_login._detect_virtual_adapters", return_value=[])
+    @patch("campus_auto_login._get_portal_route_info")
+    @patch("campus_auto_login.socket.create_connection", side_effect=OSError("test error"))
+    @patch("campus_auto_login.fetch_direct_text", side_effect=OSError("test"))
+    def test_socket_fail_shown(self, mock_fetch, mock_sock, mock_route, mock_vnet):
+        mock_route.return_value = {"ifIndex": None, "alias": None, "sourceIP": None, "nextHop": None, "metric": None}
+        lines = diagnose_portal_connectivity("http://10.200.84.3")
+        self.assertTrue(any("FAIL" in l for l in lines))
 
 
 class TestExtractPortalFromUrl(unittest.TestCase):
@@ -492,6 +500,97 @@ class TestWaitForPortalReady(unittest.TestCase):
         result = wait_for_portal_ready("http://10.200.84.3", timeout_seconds=10, interval=1)
         self.assertIsNotNone(result)
         self.assertEqual(result["state"], "offline")
+
+
+class TestEnsureProcessProxyBypass(unittest.TestCase):
+    def test_sets_no_proxy(self):
+        old_no_proxy = os.environ.get("NO_PROXY", "")
+        old_no_proxy_lower = os.environ.get("no_proxy", "")
+        try:
+            os.environ.pop("NO_PROXY", None)
+            os.environ.pop("no_proxy", None)
+            ensure_process_proxy_bypass_for_portal(["10.200.84.3"])
+            self.assertIn("10.200.84.3", os.environ.get("NO_PROXY", ""))
+            self.assertIn("10.200.84.3", os.environ.get("no_proxy", ""))
+            self.assertIn("localhost", os.environ.get("NO_PROXY", ""))
+        finally:
+            os.environ["NO_PROXY"] = old_no_proxy
+            os.environ["no_proxy"] = old_no_proxy_lower
+
+    def test_appends_to_existing(self):
+        old_no_proxy = os.environ.get("NO_PROXY", "")
+        try:
+            os.environ["NO_PROXY"] = "example.com"
+            ensure_process_proxy_bypass_for_portal(["10.200.84.3"])
+            val = os.environ["NO_PROXY"]
+            self.assertIn("example.com", val)
+            self.assertIn("10.200.84.3", val)
+        finally:
+            os.environ["NO_PROXY"] = old_no_proxy
+
+
+class TestGetPortalRouteInfo(unittest.TestCase):
+    def test_parses_route_output(self):
+        route_output = """
+===========================================================================
+Active Routes:
+     Network Destination        Netmask          Gateway       Interface  Metric
+          0.0.0.0          0.0.0.0      10.211.0.1   10.211.223.248     35
+===========================================================================
+"""
+        with patch("campus_auto_login.os.popen") as mock_popen:
+            mock_handle = MagicMock()
+            # First call: route print, second call: PowerShell (optional)
+            mock_handle.read.side_effect = [route_output, ""]
+            mock_popen.return_value = mock_handle
+            info = _get_portal_route_info("10.200.84.3")
+            self.assertEqual(info["nextHop"], "10.211.0.1")
+            self.assertEqual(info["sourceIP"], "10.211.223.248")
+            self.assertEqual(info["metric"], "35")
+
+    def test_returns_empty_on_failure(self):
+        with patch("campus_auto_login.os.popen") as mock_popen:
+            mock_handle = MagicMock()
+            mock_handle.read.return_value = ""
+            mock_popen.return_value = mock_handle
+            info = _get_portal_route_info("10.200.84.3")
+            self.assertIsNone(info["nextHop"])
+
+
+class TestDiagnoseContainsRouteInfo(unittest.TestCase):
+    @patch("campus_auto_login._detect_virtual_adapters", return_value=[])
+    @patch("campus_auto_login._get_portal_route_info")
+    @patch("campus_auto_login.socket.create_connection")
+    @patch("campus_auto_login.fetch_direct_text")
+    def test_output_contains_route_fields(self, mock_fetch, mock_sock, mock_route, mock_vnet):
+        mock_route.return_value = {"ifIndex": "6", "alias": "WLAN", "sourceIP": "10.211.223.248", "nextHop": "10.211.0.1", "metric": "0"}
+        mock_sock.return_value = MagicMock()
+        mock_fetch.return_value = 'cb({"result":1})'
+        lines = diagnose_portal_connectivity("http://10.200.84.3")
+        text = "\n".join(lines)
+        self.assertIn("Portal route interface: WLAN", text)
+        self.assertIn("Portal route source IPv4: 10.211.223.248", text)
+        self.assertIn("Portal route next hop: 10.211.0.1", text)
+        self.assertIn("NO_PROXY includes portal subnet", text)
+
+
+class TestDiscoverPortalPriority(unittest.TestCase):
+    @patch("campus_auto_login._get_default_gateway")
+    @patch("campus_auto_login._test_portal_candidate")
+    def test_tries_default_portal_before_ncsi(self, mock_test, mock_gw):
+        # Configured portal fails, default portal succeeds
+        mock_test.side_effect = lambda url, **kw: url == "http://10.200.84.3"
+        mock_gw.return_value = None
+        result = discover_portal_base("http://10.200.100.1", timeout=1)
+        self.assertEqual(result, "http://10.200.84.3")
+
+    @patch("campus_auto_login._get_default_gateway")
+    @patch("campus_auto_login._test_portal_candidate")
+    def test_returns_configured_if_reachable(self, mock_test, mock_gw):
+        mock_test.return_value = True
+        mock_gw.return_value = None
+        result = discover_portal_base("http://10.200.84.3", timeout=1)
+        self.assertEqual(result, "http://10.200.84.3")
 
 
 if __name__ == "__main__":
