@@ -22,10 +22,10 @@ from urllib.error import HTTPError, URLError
 
 DEFAULT_PORTAL = "http://10.200.84.3"
 APP_NAME = "YAU-AutoNet-Connect"
-APP_VERSION = "1.0.3"
+APP_VERSION = "1.0.4"
 __version__ = APP_VERSION
 
-# Legacy urllib opener kept for backward compatibility; v1.0.3 core path uses http.client direct.
+# Legacy urllib opener kept for backward compatibility; v1.0.4 core path uses http.client direct.
 DIRECT_OPENER = request.build_opener(request.ProxyHandler({}))
 
 
@@ -53,6 +53,27 @@ def fetch_direct_text(url, headers=None, timeout=10):
         if status >= 400:
             raise OSError("HTTP {0} {1} from {2}".format(status, resp.reason, url))
         return body.decode("utf-8", errors="replace")
+    finally:
+        conn.close()
+
+
+def fetch_direct_raw(url, headers=None, timeout=10):
+    """Like fetch_direct_text but returns (status, reason, headers_dict, body_text).
+    Used for portal discovery where we need to inspect redirects."""
+    parsed = parse.urlsplit(url)
+    if parsed.scheme and parsed.scheme != "http":
+        raise ValueError("fetch_direct_raw only supports http:// URLs")
+    host = parsed.hostname
+    port = parsed.port or 80
+    path_with_query = parsed.path or "/"
+    if parsed.query:
+        path_with_query = "{0}?{1}".format(path_with_query, parsed.query)
+    conn = http.client.HTTPConnection(host, port, timeout=timeout)
+    try:
+        conn.request("GET", path_with_query, headers=headers or {})
+        resp = conn.getresponse()
+        body = resp.read().decode("utf-8", errors="replace")
+        return resp.status, resp.reason, dict(resp.getheaders()), body
     finally:
         conn.close()
 
@@ -359,8 +380,25 @@ def login_once(config, args):
                     "System proxy is enabled, but raw direct socket also failed; "
                     "this is likely a route/network reachability issue, not only urllib proxy.",
                 )
-        maybe_diagnose(config["portal_base"], args.log)
-        return False
+        # Try portal auto-discovery before giving up
+        discovered = discover_portal_base(
+            config["portal_base"], timeout=3,
+            log_fn=lambda msg: write_log(args.log, msg),
+        )
+        if discovered.rstrip("/") != config["portal_base"].rstrip("/"):
+            write_log(args.log, "Switching to discovered portal: {0}".format(discovered))
+            config["portal_base"] = discovered
+            # Retry with discovered portal
+            status = get_status(config["portal_base"])
+            if status["reachable"]:
+                write_log(args.log, "Discovered portal is reachable.")
+                # Fall through to normal login flow below
+            else:
+                maybe_diagnose(config["portal_base"], args.log)
+                return False
+        else:
+            maybe_diagnose(config["portal_base"], args.log)
+            return False
     if status["online"]:
         write_log(args.log, "Already online.No login needed.")
         return True
@@ -462,6 +500,140 @@ def normalize_interval(seconds):
     if seconds > MAX_INTERVAL_SECONDS:
         return MAX_INTERVAL_SECONDS
     return seconds
+
+
+# ---------------------------------------------------------------------------
+# Portal auto-discovery
+# ---------------------------------------------------------------------------
+
+# Common connectivity-check URLs that campus networks often redirect to portal
+_NCSI_PROBE_URLS = [
+    "http://www.msftconnecttest.com/connecttest.txt",
+    "http://connectivitycheck.gstatic.com/generate_204",
+    "http://neverssl.com/",
+    "http://captive.apple.com/hotspot-detect.html",
+]
+
+
+def _extract_portal_from_url(url):
+    """Extract potential portal base URL from a redirect URL."""
+    parsed = parse.urlsplit(url)
+    if not parsed.hostname:
+        return None
+    host = parsed.hostname
+    # Skip if it's a known public host
+    skip_hosts = {
+        "www.msftconnecttest.com", "connectivitycheck.gstatic.com",
+        "neverssl.com", "captive.apple.com",
+    }
+    if host in skip_hosts:
+        return None
+    scheme = parsed.scheme or "http"
+    port = parsed.port
+    if port and port != 80:
+        return "{0}://{1}:{2}".format(scheme, host, port)
+    return "{0}://{1}".format(scheme, host)
+
+
+def _test_portal_candidate(base_url, timeout=3):
+    """Test if a URL is a reachable campus portal by checking /drcom/chkstatus."""
+    try:
+        text = fetch_direct_text(
+            "{0}/drcom/chkstatus?callback=_test&jsVersion=4.X&v=1&lang=zh".format(base_url.rstrip("/")),
+            headers={"User-Agent": "Mozilla/5.0 campus-auto-login-discovery"},
+            timeout=timeout,
+        )
+        # Check if response looks like JSONP with result field
+        obj = jsonp_to_obj(text)
+        if isinstance(obj, dict) and "result" in obj:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _get_default_gateway():
+    """Get the default gateway IP (read-only, best-effort)."""
+    try:
+        output = os.popen("route print 0.0.0.0").read(2048)
+        for line in output.splitlines():
+            parts = line.split()
+            if len(parts) >= 3 and parts[0] == "0.0.0.0":
+                gw = parts[2]
+                if gw and gw != "0.0.0.0":
+                    return gw
+    except Exception:
+        pass
+    return None
+
+
+def _get_gateway_subnet_candidates(gateway, count=5):
+    """Generate candidate portal IPs from the default gateway's subnet.
+    Tries the gateway itself and nearby addresses."""
+    if not gateway:
+        return []
+    parts = gateway.split(".")
+    if len(parts) != 4:
+        return []
+    candidates = []
+    # Try the gateway itself
+    candidates.append("http://{0}".format(gateway))
+    # Try the .1 and .3 addresses in the same subnet
+    base = ".".join(parts[:3])
+    for suffix in [1, 3, 2, 100, 254]:
+        ip = "{0}.{1}".format(base, suffix)
+        if ip != gateway:
+            candidates.append("http://{0}".format(ip))
+    return candidates[:count]
+
+
+def discover_portal_base(configured_portal_base, timeout=3, log_fn=None):
+    """Discover the campus portal base URL.
+    Tries: configured value -> NCSI probes -> gateway subnet candidates.
+    Returns the working portal base URL, or the configured one if nothing found.
+    """
+    def _log(msg):
+        if log_fn:
+            log_fn(msg)
+
+    # 1. Try the configured portal
+    configured = configured_portal_base.rstrip("/")
+    if _test_portal_candidate(configured, timeout=timeout):
+        _log("Portal confirmed: {0}".format(configured))
+        return configured
+
+    _log("Configured portal {0} not reachable, attempting auto-discovery...".format(configured))
+
+    # 2. Try NCSI probe URLs to detect captive portal redirect
+    for probe_url in _NCSI_PROBE_URLS:
+        try:
+            status, reason, headers, body = fetch_direct_raw(
+                probe_url,
+                headers={"User-Agent": "Mozilla/5.0 Windows NT 10.0 Win64 x64 campus-auto-login-discovery"},
+                timeout=timeout,
+            )
+            location = headers.get("Location") or headers.get("location", "")
+            if location:
+                candidate = _extract_portal_from_url(location)
+                if candidate and _test_portal_candidate(candidate, timeout=timeout):
+                    _log("Auto-discovered portal via redirect from {0}: {1}".format(probe_url, candidate))
+                    return candidate
+        except Exception:
+            continue
+
+    # 3. Try default gateway and nearby IPs
+    gateway = _get_default_gateway()
+    if gateway:
+        _log("Default gateway: {0}, probing subnet...".format(gateway))
+        for candidate in _get_gateway_subnet_candidates(gateway):
+            if candidate.rstrip("/") == configured:
+                continue  # already tried
+            if _test_portal_candidate(candidate, timeout=timeout):
+                _log("Auto-discovered portal via gateway subnet: {0}".format(candidate))
+                return candidate
+
+    _log("Auto-discovery failed, using configured portal: {0}".format(configured))
+    return configured
 
 
 # ---------------------------------------------------------------------------
@@ -737,6 +909,14 @@ def run_tray_mode(args):
             config["portal_base"] = args.portal_base.rstrip("/")
         write_log(args.log, "校园网自动登录已在后台启动，监控间隔={0}s.".format(args.interval))
         write_log(args.log, "Portal requests use raw http.client direct transport to bypass system proxy.")
+        # Portal auto-discovery at startup
+        discovered = discover_portal_base(
+            config["portal_base"], timeout=3,
+            log_fn=lambda msg: write_log(args.log, msg),
+        )
+        if discovered.rstrip("/") != config["portal_base"].rstrip("/"):
+            write_log(args.log, "Auto-discovered portal: {0}".format(discovered))
+            config["portal_base"] = discovered
         while True:
             try:
                 login_once(config, args)
@@ -781,12 +961,28 @@ def main():
         lines = diagnose_portal_connectivity(args.portal_base)
         for line in lines:
             write_log(args.log, line)
+        # Also run portal discovery
+        write_log(args.log, "--- Portal Auto-Discovery ---")
+        discovered = discover_portal_base(
+            args.portal_base, timeout=3,
+            log_fn=lambda msg: write_log(args.log, msg),
+        )
+        write_log(args.log, "Discovered portal: {0}".format(discovered))
+        write_log(args.log, "--- End Discovery ---")
         return 0
 
     if args.once:
         config = read_config(args.config)
         if args.portal_base != DEFAULT_PORTAL:
             config["portal_base"] = args.portal_base.rstrip("/")
+        # Portal auto-discovery for --once mode
+        discovered = discover_portal_base(
+            config["portal_base"], timeout=3,
+            log_fn=lambda msg: write_log(args.log, msg),
+        )
+        if discovered.rstrip("/") != config["portal_base"].rstrip("/"):
+            write_log(args.log, "Auto-discovered portal: {0}".format(discovered))
+            config["portal_base"] = discovered
         return 0 if login_once(config, args) else 1
 
     if not args.tray and not args.init and not args.once and not args.check:

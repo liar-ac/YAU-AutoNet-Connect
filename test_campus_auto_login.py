@@ -2,15 +2,17 @@
 """Lightweight tests for campus_auto_login (no network required)."""
 import json
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, call
 
 from campus_auto_login import (
     DIRECT_OPENER,
     account_prefix,
     client_info_from_status,
     diagnose_portal_connectivity,
+    discover_portal_base,
     eportal_login_url,
     fetch_direct_text,
+    fetch_direct_raw,
     invoke_jsonp,
     invoke_url_jsonp,
     jsonp_to_obj,
@@ -18,6 +20,10 @@ from campus_auto_login import (
     open_direct,
     query_string,
     __version__,
+    _extract_portal_from_url,
+    _test_portal_candidate,
+    _get_default_gateway,
+    _get_gateway_subnet_candidates,
 )
 
 
@@ -97,8 +103,6 @@ class TestClientInfoFromStatus(unittest.TestCase):
 
 
 class TestDirectOpener(unittest.TestCase):
-    """Verify that legacy DIRECT_OPENER still exists for backward compatibility."""
-
     def test_direct_opener_exists(self):
         self.assertIsNotNone(DIRECT_OPENER)
 
@@ -107,8 +111,6 @@ class TestDirectOpener(unittest.TestCase):
 
 
 class TestFetchDirectText(unittest.TestCase):
-    """Verify fetch_direct_text uses http.client.HTTPConnection."""
-
     @patch("campus_auto_login.http.client.HTTPConnection")
     def test_uses_http_client(self, mock_conn_cls):
         mock_conn = MagicMock()
@@ -174,6 +176,25 @@ class TestFetchDirectText(unittest.TestCase):
         self.assertIn("404", str(ctx.exception))
 
 
+class TestFetchDirectRaw(unittest.TestCase):
+    @patch("campus_auto_login.http.client.HTTPConnection")
+    def test_returns_status_headers_body(self, mock_conn_cls):
+        mock_conn = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'hello'
+        mock_resp.status = 302
+        mock_resp.reason = "Found"
+        mock_resp.getheaders.return_value = [("Location", "http://10.200.84.3/portal")]
+        mock_conn.getresponse.return_value = mock_resp
+        mock_conn_cls.return_value = mock_conn
+
+        status, reason, headers, body = fetch_direct_raw("http://example.com/test")
+        self.assertEqual(status, 302)
+        self.assertEqual(reason, "Found")
+        self.assertEqual(headers["Location"], "http://10.200.84.3/portal")
+        self.assertEqual(body, "hello")
+
+
 class TestInvokeJsonpUsesFetchDirect(unittest.TestCase):
     @patch("campus_auto_login.fetch_direct_text")
     def test_invoke_jsonp_calls_fetch_direct(self, mock_fetch):
@@ -225,6 +246,105 @@ class TestDiagnosePortalConnectivity(unittest.TestCase):
              patch("campus_auto_login._check_proxy_env", return_value=False):
             lines = diagnose_portal_connectivity("http://10.200.84.3")
             self.assertTrue(any("FAIL" in l for l in lines))
+
+
+class TestExtractPortalFromUrl(unittest.TestCase):
+    def test_extracts_portal_ip(self):
+        result = _extract_portal_from_url("http://10.200.84.3/portal/login")
+        self.assertEqual(result, "http://10.200.84.3")
+
+    def test_extracts_portal_with_port(self):
+        result = _extract_portal_from_url("http://10.200.84.3:8080/portal")
+        self.assertEqual(result, "http://10.200.84.3:8080")
+
+    def test_skips_known_public_hosts(self):
+        self.assertIsNone(_extract_portal_from_url("http://www.msftconnecttest.com/connecttest.txt"))
+        self.assertIsNone(_extract_portal_from_url("http://connectivitycheck.gstatic.com/generate_204"))
+        self.assertIsNone(_extract_portal_from_url("http://neverssl.com/"))
+
+    def test_returns_none_for_no_host(self):
+        self.assertIsNone(_extract_portal_from_url(""))
+
+
+class TestTestPortalCandidate(unittest.TestCase):
+    @patch("campus_auto_login.fetch_direct_text")
+    def test_returns_true_for_valid_portal(self, mock_fetch):
+        mock_fetch.return_value = 'test_cb({"result":1})'
+        self.assertTrue(_test_portal_candidate("http://10.200.84.3"))
+        mock_fetch.assert_called_once()
+
+    @patch("campus_auto_login.fetch_direct_text")
+    def test_returns_false_on_error(self, mock_fetch):
+        mock_fetch.side_effect = OSError("unreachable")
+        self.assertFalse(_test_portal_candidate("http://10.200.84.3"))
+
+    @patch("campus_auto_login.fetch_direct_text")
+    def test_returns_false_for_non_portal_response(self, mock_fetch):
+        mock_fetch.return_value = "<html>Not a portal</html>"
+        self.assertFalse(_test_portal_candidate("http://10.200.84.3"))
+
+
+class TestGetDefaultGateway(unittest.TestCase):
+    @patch("campus_auto_login.os.popen")
+    def test_parses_gateway(self, mock_popen):
+        mock_popen.return_value.read.return_value = """
+Active Routes:
+Network Destination        Netmask          Gateway       Interface  Metric
+          0.0.0.0          0.0.0.0      10.211.223.1   10.211.223.248     35
+"""
+        gw = _get_default_gateway()
+        self.assertEqual(gw, "10.211.223.1")
+
+    @patch("campus_auto_login.os.popen")
+    def test_returns_none_on_failure(self, mock_popen):
+        mock_popen.side_effect = Exception("fail")
+        self.assertIsNone(_get_default_gateway())
+
+
+class TestGetGatewaySubnetCandidates(unittest.TestCase):
+    def test_generates_candidates(self):
+        candidates = _get_gateway_subnet_candidates("10.211.223.1", count=5)
+        self.assertTrue(len(candidates) > 0)
+        self.assertIn("http://10.211.223.1", candidates)
+        self.assertIn("http://10.211.223.3", candidates)
+
+    def test_returns_empty_for_invalid(self):
+        self.assertEqual(_get_gateway_subnet_candidates(None), [])
+        self.assertEqual(_get_gateway_subnet_candidates(""), [])
+
+    def test_limits_count(self):
+        candidates = _get_gateway_subnet_candidates("10.0.0.1", count=2)
+        self.assertTrue(len(candidates) <= 2)
+
+
+class TestDiscoverPortalBase(unittest.TestCase):
+    @patch("campus_auto_login._test_portal_candidate")
+    def test_returns_configured_if_reachable(self, mock_test):
+        mock_test.return_value = True
+        result = discover_portal_base("http://10.200.84.3")
+        self.assertEqual(result, "http://10.200.84.3")
+
+    @patch("campus_auto_login._get_default_gateway")
+    @patch("campus_auto_login._test_portal_candidate")
+    @patch("campus_auto_login.fetch_direct_raw")
+    def test_tries_discovery_when_unreachable(self, mock_raw, mock_test, mock_gw):
+        # Configured portal fails
+        mock_test.side_effect = [False, False, False, True]
+        mock_raw.side_effect = OSError("fail")
+        mock_gw.return_value = "10.211.223.1"
+        result = discover_portal_base("http://10.200.84.3", timeout=1)
+        # Should have tried multiple candidates
+        self.assertTrue(mock_test.call_count > 1)
+
+    @patch("campus_auto_login._get_default_gateway")
+    @patch("campus_auto_login._test_portal_candidate")
+    @patch("campus_auto_login.fetch_direct_raw")
+    def test_returns_configured_if_nothing_found(self, mock_raw, mock_test, mock_gw):
+        mock_test.return_value = False
+        mock_raw.side_effect = OSError("fail")
+        mock_gw.return_value = None
+        result = discover_portal_base("http://10.200.84.3", timeout=1)
+        self.assertEqual(result, "http://10.200.84.3")
 
 
 if __name__ == "__main__":
