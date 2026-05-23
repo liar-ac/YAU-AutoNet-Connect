@@ -78,6 +78,38 @@ def fetch_direct_raw(url, headers=None, timeout=10):
         conn.close()
 
 
+def _is_socket_unreachable_error(exc):
+    """Check if an exception is a socket-level reachability error (transient)."""
+    msg = str(exc)
+    return (
+        "[WinError 10065]" in msg
+        or "Network is unreachable" in msg
+        or "timed out" in msg.lower()
+        or "[Errno 110]" in msg  # ETIMEDOUT on Linux
+        or "[Errno 101]" in msg  # ENETUNREACH
+        or "[Errno 113]" in msg  # EHOSTUNREACH
+    )
+
+
+def fetch_text_with_retry(url, headers=None, timeout=10, retries=None):
+    """fetch_direct_text with short retry on socket-level errors.
+    Returns (text, attempt_number) where attempt is 1-based."""
+    if retries is None:
+        retries = [1, 3, 5]  # retry delays in seconds
+    last_exc = None
+    for attempt, delay in enumerate([0] + retries):
+        if delay > 0:
+            time.sleep(delay)
+        try:
+            text = fetch_direct_text(url, headers=headers, timeout=timeout)
+            return text, attempt + 1
+        except (OSError, ValueError) as exc:
+            if not _is_socket_unreachable_error(exc) or attempt >= len(retries):
+                raise
+            last_exc = exc
+    raise last_exc
+
+
 def app_base_dir():
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
@@ -346,41 +378,79 @@ def init_config(args):
 
 
 def get_status(portal_base):
+    """Check portal status. Returns a dict with 'state' field:
+    - "online": portal reachable and user is logged in
+    - "offline": portal reachable but user not logged in
+    - "portal_unreachable": portal HTTP error (not socket-level)
+    - "network_not_ready": socket-level failure (transient, may recover)
+    """
     try:
-        data = invoke_jsonp(portal_base, "/drcom/chkstatus", timeout=8)
+        url = "{0}/drcom/chkstatus?callback=_ck&jsVersion=4.X&v={1}&lang=zh".format(
+            portal_base.rstrip("/"), random.randint(500, 10500)
+        )
+        headers = {
+            "User-Agent": "Mozilla/5.0 Windows NT 10.0 Win64 x64 campus-auto-login-python",
+            "Accept": "*/*",
+        }
+        content, attempts = fetch_text_with_retry(url, headers=headers, timeout=8)
+        data = jsonp_to_obj(content)
+        result_val = int(data.get("result", 0))
         return {
+            "state": "online" if result_val == 1 else "offline",
             "reachable": True,
-            "online": int(data.get("result", 0)) == 1,
+            "online": result_val == 1,
             "raw": data,
             "error": None,
+            "attempts": attempts,
         }
     except (HTTPError, URLError, TimeoutError, ValueError, OSError) as exc:
+        is_socket = _is_socket_unreachable_error(exc)
         return {
+            "state": "network_not_ready" if is_socket else "portal_unreachable",
             "reachable": False,
             "online": False,
             "raw": None,
             "error": str(exc),
-            "is_network_unreachable": "[WinError 10065]" in str(exc)
-            or "Network is unreachable" in str(exc),
+            "is_network_unreachable": is_socket,
         }
 
 
-def login_once(config, args):
+def login_once(config, args, failure_state=None):
+    """Attempt one login cycle. Returns True if online after this call.
+    failure_state: dict to track consecutive failures across calls (for tray loop).
+    """
     status = get_status(config["portal_base"])
-    if not status["reachable"]:
-        write_log(args.log, "Portal unreachable via raw direct HTTP: {0}".format(status["error"]))
-        if status.get("is_network_unreachable"):
-            write_log(
-                args.log,
-                "This means the campus portal host is not reachable from the current network route.",
+
+    if status["state"] == "network_not_ready":
+        # Socket-level failure - transient, likely Wi-Fi roaming or network transition
+        if failure_state is not None:
+            failure_state["consecutive_failures"] = failure_state.get("consecutive_failures", 0) + 1
+            count = failure_state["consecutive_failures"]
+        else:
+            count = 1
+
+        if count <= 1:
+            write_log(args.log, "Portal temporarily unreachable, will retry next cycle.")
+        elif count == 2:
+            write_log(args.log, "Portal still unreachable ({0} consecutive). Running auto-discovery...".format(count))
+            discovered = discover_portal_base(
+                config["portal_base"], timeout=3,
+                log_fn=lambda msg: write_log(args.log, msg),
             )
-            if _check_system_proxy_enabled():
-                write_log(
-                    args.log,
-                    "System proxy is enabled, but raw direct socket also failed; "
-                    "this is likely a route/network reachability issue, not only urllib proxy.",
-                )
-        # Try portal auto-discovery before giving up
+            if discovered.rstrip("/") != config["portal_base"].rstrip("/"):
+                write_log(args.log, "Switching to discovered portal: {0}".format(discovered))
+                config["portal_base"] = discovered
+        elif count >= 3:
+            write_log(args.log, "Portal unreachable ({0} consecutive). Route exists but TCP failed. Waiting for network.".format(count))
+            maybe_diagnose(config["portal_base"], args.log)
+        return False
+
+    if status["state"] == "portal_unreachable":
+        # HTTP-level error, not transient socket
+        write_log(args.log, "Portal HTTP error: {0}".format(status["error"]))
+        if failure_state is not None:
+            failure_state["consecutive_failures"] = failure_state.get("consecutive_failures", 0) + 1
+        # Try portal auto-discovery
         discovered = discover_portal_base(
             config["portal_base"], timeout=3,
             log_fn=lambda msg: write_log(args.log, msg),
@@ -388,17 +458,18 @@ def login_once(config, args):
         if discovered.rstrip("/") != config["portal_base"].rstrip("/"):
             write_log(args.log, "Switching to discovered portal: {0}".format(discovered))
             config["portal_base"] = discovered
-            # Retry with discovered portal
             status = get_status(config["portal_base"])
-            if status["reachable"]:
-                write_log(args.log, "Discovered portal is reachable.")
-                # Fall through to normal login flow below
-            else:
-                maybe_diagnose(config["portal_base"], args.log)
+            if not status["reachable"]:
                 return False
         else:
-            maybe_diagnose(config["portal_base"], args.log)
             return False
+
+    # Portal is reachable - reset failure counter
+    if failure_state is not None:
+        failure_state["consecutive_failures"] = 0
+
+    if status.get("attempts", 1) > 1:
+        write_log(args.log, "Portal reached after {0} attempts.".format(status["attempts"]))
     if status["online"]:
         write_log(args.log, "Already online.No login needed.")
         return True
@@ -667,9 +738,83 @@ def _check_proxy_env():
     return False
 
 
+def _get_active_ipv4():
+    """Get the active IPv4 address from the WLAN adapter (best-effort)."""
+    try:
+        output = os.popen("ipconfig").read(4096)
+        # Look for WLAN section and its IPv4 address
+        in_wlan = False
+        for line in output.splitlines():
+            if "WLAN" in line or "Wi-Fi" in line or "Wireless" in line:
+                in_wlan = True
+            elif in_wlan and ("IPv4" in line or "IP Address" in line):
+                parts = line.split(":")
+                if len(parts) >= 2:
+                    addr = parts[1].strip().rstrip(".")
+                    if addr and not addr.startswith("169.254"):
+                        return addr
+            elif in_wlan and line.strip() == "":
+                in_wlan = False
+        # Fallback: get any non-loopback IPv4
+        for line in output.splitlines():
+            if ("IPv4" in line or "IP Address" in line) and "127.0.0.1" not in line:
+                parts = line.split(":")
+                if len(parts) >= 2:
+                    addr = parts[1].strip().rstrip(".")
+                    if addr and not addr.startswith("169.254"):
+                        return addr
+    except Exception:
+        pass
+    return "unknown"
+
+
+def _get_proxy_details():
+    """Get proxy server and ProxyOverride from registry (read-only)."""
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+            0,
+            winreg.KEY_READ,
+        ) as key:
+            server = ""
+            override = ""
+            try:
+                server, _ = winreg.QueryValueEx(key, "ProxyServer")
+            except (OSError, ValueError):
+                pass
+            try:
+                override, _ = winreg.QueryValueEx(key, "ProxyOverride")
+            except (OSError, ValueError):
+                pass
+            return server, override
+    except (OSError, ValueError):
+        return "", ""
+
+
+def _detect_virtual_adapters():
+    """Detect TUN/TAP/virtual network adapters (read-only)."""
+    keywords = ["tun", "tap", "wintun", "clash", "meta", "wireguard", "vpn", "sstap", "secitap", "netease uu"]
+    found = []
+    try:
+        output = os.popen("ipconfig /all").read(16384)
+        current_adapter = ""
+        for line in output.splitlines():
+            if line and not line.startswith(" ") and "adapter" in line.lower():
+                current_adapter = line.strip()
+            elif current_adapter:
+                lower = current_adapter.lower()
+                for kw in keywords:
+                    if kw in lower and current_adapter not in found:
+                        found.append(current_adapter)
+                        break
+    except Exception:
+        pass
+    return found
+
+
 def diagnose_portal_connectivity(portal_base, timeout=3, log_fn=None):
     """Diagnose connectivity to the campus portal. Returns a list of diagnostic lines."""
-    import os
     lines = []
     parsed = parse.urlsplit(portal_base.rstrip("/"))
     host = parsed.hostname or "10.200.84.3"
@@ -682,6 +827,32 @@ def diagnose_portal_connectivity(portal_base, timeout=3, log_fn=None):
     lines.append("Status URL: {0}/drcom/chkstatus".format(portal_base.rstrip("/")))
     lines.append("Login URL: {0}://{1}:801/eportal/portal/login".format(scheme, host))
 
+    # Active IPv4
+    active_ip = _get_active_ipv4()
+    lines.append("Active IPv4: {0}".format(active_ip))
+
+    # Default gateway
+    gw = _get_default_gateway()
+    lines.append("Default gateway: {0}".format(gw or "unknown"))
+
+    # Best route to portal
+    try:
+        route_output = os.popen("route print {0}".format(host)).read(1024)
+        route_lines = [l for l in route_output.splitlines() if host in l or "0.0.0.0" in l]
+        if route_lines:
+            lines.append("Route entries: {0}".format("; ".join(route_lines[:3])))
+        else:
+            lines.append("Route entries: none specific (using default)")
+    except Exception:
+        lines.append("Route entries: unavailable")
+
+    # Virtual adapters
+    vnet = _detect_virtual_adapters()
+    if vnet:
+        lines.append("Virtual/TUN adapters detected: {0}".format(", ".join(vnet)))
+    else:
+        lines.append("Virtual/TUN adapters detected: none")
+
     # Socket test port 80
     try:
         sock = socket.create_connection((host, port), timeout=timeout)
@@ -690,7 +861,7 @@ def diagnose_portal_connectivity(portal_base, timeout=3, log_fn=None):
     except OSError as exc:
         lines.append("Socket {0}:{1}: FAIL - {2}".format(host, port, exc))
 
-    # Socket test port 801 (login endpoint)
+    # Socket test port 801
     try:
         sock = socket.create_connection((host, 801), timeout=timeout)
         sock.close()
@@ -698,21 +869,28 @@ def diagnose_portal_connectivity(portal_base, timeout=3, log_fn=None):
     except OSError as exc:
         lines.append("Socket {0}:801: FAIL - {1}".format(host, exc))
 
-    # Proxy environment
-    proxy_env = _check_proxy_env()
-    lines.append("Proxy env vars detected: {0}".format("YES" if proxy_env else "NO"))
+    # Proxy details
+    proxy_server, proxy_override = _get_proxy_details()
+    lines.append("Windows proxy server: {0}".format(proxy_server or "not set"))
+    if proxy_override:
+        short_override = proxy_override[:120] + ("..." if len(proxy_override) > 120 else "")
+        lines.append("ProxyOverride: {0}".format(short_override))
 
-    # Windows system proxy
-    sys_proxy = _check_system_proxy_enabled()
-    lines.append("Windows system proxy enabled: {0}".format("YES" if sys_proxy else "NO"))
-
-    # Route check (best-effort)
-    try:
-        result = os.popen("route print {0}".format(host)).read(512)
-        has_route = "0.0.0.0" not in result.split("\n")[3] if len(result.split("\n")) > 3 else False
-        lines.append("Route to {0}: {1}".format(host, "found" if has_route else "default gateway only (may not have direct route)".format(host)))
-    except Exception:
-        lines.append("Route check: unavailable")
+    # Proxy env
+    proxy_env_vals = []
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+        val = os.environ.get(name, "")
+        if val:
+            # Show only host:port, not full URL with credentials
+            try:
+                p = parse.urlsplit(val)
+                proxy_env_vals.append("{0}={1}:{2}".format(name, p.hostname, p.port))
+            except Exception:
+                proxy_env_vals.append("{0}=<set>".format(name))
+    if proxy_env_vals:
+        lines.append("Proxy env vars: {0}".format(", ".join(proxy_env_vals)))
+    else:
+        lines.append("Proxy env vars: none")
 
     lines.append("--- End Diagnostic ---")
 
@@ -730,6 +908,30 @@ def maybe_diagnose(portal_base, log_path):
         return
     _last_diagnose_time = now
     diagnose_portal_connectivity(portal_base, log_fn=lambda msg: write_log(log_path, msg))
+
+
+def wait_for_portal_ready(portal_base, timeout_seconds=60, interval=5, log_fn=None):
+    """Wait for the portal to become reachable. Returns status dict when ready, or None on timeout."""
+    deadline = time.time() + timeout_seconds
+    attempt = 0
+    while time.time() < deadline:
+        attempt += 1
+        status = get_status(portal_base)
+        if status["state"] in ("online", "offline"):
+            if log_fn:
+                log_fn("Portal reachable after {0}s ({1} attempts).".format(
+                    int(attempt * interval), attempt))
+            return status
+        if log_fn and attempt == 1:
+            log_fn("Waiting for portal to become reachable (timeout={0}s)...".format(timeout_seconds))
+        remaining = deadline - time.time()
+        sleep_time = min(interval, max(1, remaining))
+        if sleep_time <= 0:
+            break
+        time.sleep(sleep_time)
+    if log_fn:
+        log_fn("Portal not reachable after {0}s timeout.".format(timeout_seconds))
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -917,9 +1119,10 @@ def run_tray_mode(args):
         if discovered.rstrip("/") != config["portal_base"].rstrip("/"):
             write_log(args.log, "Auto-discovered portal: {0}".format(discovered))
             config["portal_base"] = discovered
+        failure_state = {"consecutive_failures": 0}
         while True:
             try:
-                login_once(config, args)
+                login_once(config, args, failure_state=failure_state)
             except Exception as exc:
                 write_log(args.log, "登录异常（{0}），{1}秒后重试".format(exc, args.interval))
             time.sleep(args.interval)
@@ -983,6 +1186,19 @@ def main():
         if discovered.rstrip("/") != config["portal_base"].rstrip("/"):
             write_log(args.log, "Auto-discovered portal: {0}".format(discovered))
             config["portal_base"] = discovered
+        # Wait for portal to become ready (--once can wait longer)
+        status = wait_for_portal_ready(
+            config["portal_base"], timeout_seconds=60, interval=5,
+            log_fn=lambda msg: write_log(args.log, msg),
+        )
+        if status is None:
+            write_log(args.log, "Portal not reachable after 60s. Campus network may not be connected.")
+            diagnose_portal_connectivity(config["portal_base"], log_fn=lambda msg: write_log(args.log, msg))
+            return 1
+        if status["online"]:
+            write_log(args.log, "Already online. No login needed.")
+            return 0
+        # Portal reachable and offline - attempt login
         return 0 if login_once(config, args) else 1
 
     if not args.tray and not args.init and not args.once and not args.check:

@@ -13,14 +13,19 @@ from campus_auto_login import (
     eportal_login_url,
     fetch_direct_text,
     fetch_direct_raw,
+    fetch_text_with_retry,
+    get_status,
     invoke_jsonp,
     invoke_url_jsonp,
     jsonp_to_obj,
+    login_once,
     normalize_interval,
     open_direct,
     query_string,
+    wait_for_portal_ready,
     __version__,
     _extract_portal_from_url,
+    _is_socket_unreachable_error,
     _test_portal_candidate,
     _get_default_gateway,
     _get_gateway_subnet_candidates,
@@ -345,6 +350,148 @@ class TestDiscoverPortalBase(unittest.TestCase):
         mock_gw.return_value = None
         result = discover_portal_base("http://10.200.84.3", timeout=1)
         self.assertEqual(result, "http://10.200.84.3")
+
+
+class TestIsSocketUnreachableError(unittest.TestCase):
+    def test_winerror_10065(self):
+        self.assertTrue(_is_socket_unreachable_error(OSError("[WinError 10065] error")))
+
+    def test_network_unreachable(self):
+        self.assertTrue(_is_socket_unreachable_error(OSError("Network is unreachable")))
+
+    def test_timed_out(self):
+        self.assertTrue(_is_socket_unreachable_error(TimeoutError("Connection timed out")))
+
+    def test_http_error_not_socket(self):
+        self.assertFalse(_is_socket_unreachable_error(OSError("HTTP 500 Internal Server Error")))
+
+    def test_value_error_not_socket(self):
+        self.assertFalse(_is_socket_unreachable_error(ValueError("bad response")))
+
+
+class TestFetchTextWithRetry(unittest.TestCase):
+    @patch("campus_auto_login.fetch_direct_text")
+    def test_succeeds_first_try(self, mock_fetch):
+        mock_fetch.return_value = '{"result":1}'
+        text, attempt = fetch_text_with_retry("http://test/path")
+        self.assertEqual(text, '{"result":1}')
+        self.assertEqual(attempt, 1)
+        self.assertEqual(mock_fetch.call_count, 1)
+
+    @patch("campus_auto_login.time.sleep")
+    @patch("campus_auto_login.fetch_direct_text")
+    def test_retries_on_socket_error(self, mock_fetch, mock_sleep):
+        mock_fetch.side_effect = [
+            OSError("[WinError 10065] error"),
+            '{"result":1}',
+        ]
+        text, attempt = fetch_text_with_retry("http://test/path", retries=[0, 0])
+        self.assertEqual(text, '{"result":1}')
+        self.assertEqual(attempt, 2)
+
+    @patch("campus_auto_login.time.sleep")
+    @patch("campus_auto_login.fetch_direct_text")
+    def test_raises_after_all_retries(self, mock_fetch, mock_sleep):
+        mock_fetch.side_effect = OSError("[WinError 10065] error")
+        with self.assertRaises(OSError):
+            fetch_text_with_retry("http://test/path", retries=[0, 0])
+        self.assertEqual(mock_fetch.call_count, 3)  # initial + 2 retries
+
+    @patch("campus_auto_login.time.sleep")
+    @patch("campus_auto_login.fetch_direct_text")
+    def test_non_socket_error_not_retried(self, mock_fetch, mock_sleep):
+        mock_fetch.side_effect = ValueError("bad json")
+        with self.assertRaises(ValueError):
+            fetch_text_with_retry("http://test/path", retries=[0, 0])
+        self.assertEqual(mock_fetch.call_count, 1)  # no retry for non-socket errors
+
+
+class TestGetStatus(unittest.TestCase):
+    @patch("campus_auto_login.fetch_text_with_retry")
+    def test_online_state(self, mock_fetch):
+        mock_fetch.return_value = ('callback({"result":1})', 1)
+        status = get_status("http://10.200.84.3")
+        self.assertEqual(status["state"], "online")
+        self.assertTrue(status["online"])
+        self.assertTrue(status["reachable"])
+
+    @patch("campus_auto_login.fetch_text_with_retry")
+    def test_offline_state(self, mock_fetch):
+        mock_fetch.return_value = ('callback({"result":0})', 1)
+        status = get_status("http://10.200.84.3")
+        self.assertEqual(status["state"], "offline")
+        self.assertFalse(status["online"])
+        self.assertTrue(status["reachable"])
+
+    @patch("campus_auto_login.fetch_text_with_retry")
+    def test_network_not_ready_on_socket_error(self, mock_fetch):
+        mock_fetch.side_effect = OSError("[WinError 10065] error")
+        status = get_status("http://10.200.84.3")
+        self.assertEqual(status["state"], "network_not_ready")
+        self.assertFalse(status["reachable"])
+        self.assertTrue(status["is_network_unreachable"])
+
+    @patch("campus_auto_login.fetch_text_with_retry")
+    def test_portal_unreachable_on_http_error(self, mock_fetch):
+        mock_fetch.side_effect = OSError("HTTP 500 Internal Server Error")
+        status = get_status("http://10.200.84.3")
+        self.assertEqual(status["state"], "portal_unreachable")
+        self.assertFalse(status["reachable"])
+        self.assertFalse(status["is_network_unreachable"])
+
+
+class TestLoginOnceNetworkNotReady(unittest.TestCase):
+    @patch("campus_auto_login.write_log")
+    @patch("campus_auto_login.get_status")
+    def test_network_not_ready_increments_failure(self, mock_status, mock_log):
+        mock_status.return_value = {"state": "network_not_ready", "reachable": False, "online": False, "raw": None, "error": "test", "is_network_unreachable": True}
+        args = MagicMock()
+        args.log = MagicMock()
+        args.check = False
+        config = {"portal_base": "http://10.200.84.3"}
+        failure_state = {"consecutive_failures": 0}
+        result = login_once(config, args, failure_state=failure_state)
+        self.assertFalse(result)
+        self.assertEqual(failure_state["consecutive_failures"], 1)
+
+    @patch("campus_auto_login.write_log")
+    @patch("campus_auto_login.get_status")
+    def test_success_resets_failure_count(self, mock_status, mock_log):
+        mock_status.return_value = {"state": "online", "reachable": True, "online": True, "raw": {}, "error": None, "attempts": 1}
+        args = MagicMock()
+        args.log = MagicMock()
+        config = {"portal_base": "http://10.200.84.3"}
+        failure_state = {"consecutive_failures": 5}
+        result = login_once(config, args, failure_state=failure_state)
+        self.assertTrue(result)
+        self.assertEqual(failure_state["consecutive_failures"], 0)
+
+
+class TestWaitForPortalReady(unittest.TestCase):
+    @patch("campus_auto_login.get_status")
+    def test_returns_immediately_if_ready(self, mock_status):
+        mock_status.return_value = {"state": "online", "reachable": True, "online": True}
+        result = wait_for_portal_ready("http://10.200.84.3", timeout_seconds=10, interval=1)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["state"], "online")
+
+    @patch("campus_auto_login.time.sleep")
+    @patch("campus_auto_login.get_status")
+    def test_returns_none_on_timeout(self, mock_status, mock_sleep):
+        mock_status.return_value = {"state": "network_not_ready", "reachable": False, "online": False}
+        result = wait_for_portal_ready("http://10.200.84.3", timeout_seconds=2, interval=1)
+        self.assertIsNone(result)
+
+    @patch("campus_auto_login.time.sleep")
+    @patch("campus_auto_login.get_status")
+    def test_recovers_after_transient_failure(self, mock_status, mock_sleep):
+        mock_status.side_effect = [
+            {"state": "network_not_ready", "reachable": False, "online": False},
+            {"state": "offline", "reachable": True, "online": False},
+        ]
+        result = wait_for_portal_ready("http://10.200.84.3", timeout_seconds=10, interval=1)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["state"], "offline")
 
 
 if __name__ == "__main__":
