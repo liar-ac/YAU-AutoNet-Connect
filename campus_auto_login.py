@@ -23,7 +23,7 @@ from urllib.error import HTTPError, URLError
 
 DEFAULT_PORTAL = "http://10.200.84.3"
 APP_NAME = "YAU-AutoNet-Connect"
-APP_VERSION = "1.0.4"
+APP_VERSION = "1.0.5"
 __version__ = APP_VERSION
 
 # Legacy urllib opener kept for backward compatibility; v1.0.4 core path uses http.client direct.
