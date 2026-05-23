@@ -2,13 +2,18 @@
 """Lightweight tests for campus_auto_login (no network required)."""
 import json
 import unittest
+from unittest.mock import MagicMock, patch
 
 from campus_auto_login import (
+    DIRECT_OPENER,
     account_prefix,
     client_info_from_status,
     eportal_login_url,
+    invoke_jsonp,
+    invoke_url_jsonp,
     jsonp_to_obj,
     normalize_interval,
+    open_direct,
     query_string,
     __version__,
 )
@@ -87,6 +92,50 @@ class TestClientInfoFromStatus(unittest.TestCase):
         ip, mac = client_info_from_status(None)
         self.assertEqual(ip, "")
         self.assertEqual(mac, "000000000000")
+
+
+class TestDirectOpener(unittest.TestCase):
+    """Verify that portal requests use a direct opener to bypass system proxy."""
+
+    def test_direct_opener_exists(self):
+        self.assertIsNotNone(DIRECT_OPENER)
+
+    def test_open_direct_exists(self):
+        self.assertTrue(callable(open_direct))
+
+    def test_direct_opener_has_handlers(self):
+        self.assertIsNotNone(DIRECT_OPENER.handlers)
+        self.assertTrue(len(DIRECT_OPENER.handlers) > 0)
+
+    @patch("campus_auto_login.open_direct")
+    def test_invoke_jsonp_uses_open_direct(self, mock_open):
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'callback({"result":1});'
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_open.return_value = mock_resp
+
+        result = invoke_jsonp("http://10.200.84.3", "/drcom/chkstatus")
+        self.assertEqual(result["result"], 1)
+        mock_open.assert_called_once()
+        args = mock_open.call_args
+        self.assertIn("10.200.84.3", args[0][0].full_url)
+
+    @patch("campus_auto_login.open_direct")
+    def test_invoke_url_jsonp_uses_open_direct(self, mock_open):
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'callback({"result":"ok"});'
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_open.return_value = mock_resp
+
+        result = invoke_url_jsonp(
+            "http://10.200.84.3:801/eportal/portal/login",
+            [("user_account", "test")],
+            portal_base="http://10.200.84.3",
+        )
+        self.assertEqual(result["result"], "ok")
+        mock_open.assert_called_once()
 
 
 if __name__ == "__main__":

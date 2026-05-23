@@ -19,8 +19,16 @@ from urllib.error import HTTPError, URLError
 
 DEFAULT_PORTAL = "http://10.200.84.3"
 APP_NAME = "YAU-AutoNet-Connect"
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.0.2"
 __version__ = APP_VERSION
+
+# Bypass system proxy for campus portal requests (avoids Clash system-proxy issues)
+DIRECT_OPENER = request.build_opener(request.ProxyHandler({}))
+
+
+def open_direct(req, timeout=10):
+    """Open a request using DIRECT_OPENER to bypass system proxy."""
+    return DIRECT_OPENER.open(req, timeout=timeout)
 
 
 def app_base_dir():
@@ -196,7 +204,7 @@ def invoke_jsonp(portal_base, path, params=None, timeout=10, force_trailing_lang
             "Accept": "*/*",
         },
     )
-    with request.urlopen(req, timeout=timeout) as resp:
+    with open_direct(req, timeout=timeout) as resp:
         content = resp.read().decode("utf-8", errors="replace")
     return jsonp_to_obj(content)
 
@@ -222,7 +230,7 @@ def invoke_url_jsonp(url_base, params=None, timeout=10, force_trailing_lang=Fals
             "Referer": referer,
         },
     )
-    with request.urlopen(req, timeout=timeout) as resp:
+    with open_direct(req, timeout=timeout) as resp:
         content = resp.read().decode("utf-8", errors="replace")
     return jsonp_to_obj(content)
 
@@ -599,6 +607,7 @@ def run_tray_mode(args):
         if args.portal_base != DEFAULT_PORTAL:
             config["portal_base"] = args.portal_base.rstrip("/")
         write_log(args.log, "校园网自动登录已在后台启动，监控间隔={0}s.".format(args.interval))
+        write_log(args.log, "Portal requests use direct opener to bypass system proxy.")
         while True:
             try:
                 login_once(config, args)

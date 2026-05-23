@@ -44,6 +44,7 @@ YAU-AutoNet-Connect 是一个面向延安大学校园网的自动登录工具，
 |---|---|
 | 系统托盘后台运行 | 双击 exe 直接最小化到托盘，无终端窗口 |
 | 自动检测与登录 | 在线时跳过，离线时自动调用认证接口登录 |
+| Clash 系统代理兼容 | 访问校园网网关时自动绕过系统代理，避免代理导致 Portal unreachable |
 | 实时日志窗口 | 托盘右键菜单打开，实时显示运行日志 |
 | 开机自启 | 托盘右键菜单一键切换，写入 Windows 注册表 |
 | 防重复运行 | Windows Mutex 保护，重复启动时弹窗提示 |
@@ -104,6 +105,8 @@ YAU-AutoNet-Connect 是一个面向延安大学校园网的自动登录工具，
 | 退出 | 关闭程序 |
 
 程序运行时会自动检测网络状态：在线时跳过，离线时尝试登录。日志超过 1MB 会自动归档为 `.log.old`。
+
+> **v1.0.2 说明：** 本次更新没有改变启动方式和后台运行方式。双击 exe 后仍在系统托盘静默运行，不需要长期打开终端窗口。开机自启后同样在后台静默运行。
 
 ---
 
@@ -226,6 +229,8 @@ python watch_build.py
 - exe 路径**建议使用纯英文**，例如 `D:\tools\YAU-AutoNet-Connect\`，避免中文、空格或特殊字符
 - 不需要管理员权限运行
 - 如果提示"已在运行中"，检查任务管理器中是否已有 `campus_auto_login.exe` 进程
+- 如果只开启 Clash 系统代理，不需要手动关闭 Clash，本工具访问校园网网关时会自动直连
+- 如果开启 TUN/虚拟网卡模式，仍建议在 Clash 规则中给校园网网关和内网 IP 段添加 DIRECT 规则
 - 不要把配置文件（`campus_login_py.config.json`、`campus_login.config.json`）和日志文件上传到 GitHub
 
 ---
@@ -239,6 +244,7 @@ python watch_build.py
 | 单用户单机 | DPAPI 加密绑定当前 Windows 用户，换用户或换机需重新 `--init` |
 | PowerShell 版无托盘 | PowerShell 版不支持系统托盘、日志窗口和开机自启菜单 |
 | 日志无远程上报 | 日志仅写入本地文件，不支持远程查看或上报 |
+| TUN/虚拟网卡模式 | 本版本主要解决系统代理场景；TUN/虚拟网卡属于更底层流量接管，仍需在 Clash 规则中配置 DIRECT |
 
 ---
 
@@ -253,6 +259,19 @@ python watch_build.py
 | 托盘图标找不到 | 查看任务栏隐藏图标区域，或检查任务管理器 |
 | 提示"已在运行中" | 已有实例在运行，任务管理器结束已有进程 |
 | `--check` 显示 Offline | 确认已连接校园网，尝试运行 `--once` |
+| 开启 Clash 系统代理后提示 Portal unreachable | 系统代理可能导致程序访问 `10.200.84.3` 时走代理，代理无法访问校园网内网网关。v1.0.2 起 Python 版已强制直连校园网网关。如仍失败，请检查是否开启了 TUN/虚拟网卡模式，并在 Clash 规则中加入以下 DIRECT 规则（见下方示例） |
+
+**Clash 内网直连规则示例**（适用于 TUN/虚拟网卡模式）：
+
+```yaml
+rules:
+  - IP-CIDR,10.200.84.3/32,DIRECT,no-resolve
+  - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve
+  - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve
+  - IP-CIDR,100.64.0.0/10,DIRECT,no-resolve
+  - DOMAIN-SUFFIX,edu.cn,DIRECT
+```
 
 ---
 

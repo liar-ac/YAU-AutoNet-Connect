@@ -12,6 +12,30 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+function Invoke-DirectWebRequest {
+    <#
+    .SYNOPSIS
+        Wrapper around Invoke-WebRequest that bypasses system proxy for campus portal requests.
+        PowerShell 7+ uses -NoProxy; PowerShell 5.1 falls back gracefully without it.
+    #>
+    param(
+        [string]$Uri,
+        [hashtable]$Headers,
+        [int]$TimeoutSec = 10
+    )
+    $splat = @{
+        Uri            = $Uri
+        UseBasicParsing = $true
+        TimeoutSec     = $TimeoutSec
+        Headers        = $Headers
+    }
+    # -NoProxy is available in PowerShell 7+; PowerShell 5.1 does not have it
+    if ($PSVersionTable.PSVersion.Major -ge 7) {
+        $splat['NoProxy'] = $true
+    }
+    return Invoke-WebRequest @splat
+}
+
 function Write-Log {
     param([string]$Message)
     $line = "[{0}] {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $Message
@@ -62,7 +86,7 @@ function Invoke-PortalJsonp {
     }
     $base = $PortalBase.TrimEnd("/")
     $uri = "{0}{1}?{2}" -f $base, $Path, (New-QueryString $allParams)
-    $response = Invoke-WebRequest -Uri $uri -UseBasicParsing -TimeoutSec $TimeoutSec -Headers @{
+    $response = Invoke-DirectWebRequest -Uri $uri -TimeoutSec $TimeoutSec -Headers @{
         "User-Agent" = "Mozilla/5.0 Windows NT 10.0 Win64 x64 campus-auto-login"
         "Accept" = "*/*"
     }

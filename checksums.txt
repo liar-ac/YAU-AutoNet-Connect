@@ -1,1 +1,1 @@
-fb21773a413f45dc2c4368ebb3f624f96deb6fbdbf18a6aede55ec2acfb21c23  campus_auto_login.exe
+0e1546f272dc7ad614775d1231ca9a6647cf3c9b3b0dd3c625b1dbe9a62db10c  campus_auto_login.exe
