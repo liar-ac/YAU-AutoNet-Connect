@@ -198,24 +198,69 @@ def fetch_direct_with_source(url, source_ip, headers=None, timeout=10):
 
 
 def _powershell_no_proxy_fetch(url, timeout=10):
-    """Fetch URL using PowerShell's .NET WebClient with proxy explicitly bypassed."""
+    """Fetch URL using PowerShell's .NET WebClient with proxy explicitly bypassed.
+    Uses a temp .ps1 file to avoid shell interpretation of URL characters like &."""
+    import subprocess
+    import base64 as _b64
+    import tempfile
+    # Build PowerShell script that outputs Base64-encoded response body
+    escaped_url = url.replace("'", "''")
+    ps_script = (
+        "[System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12\n"
+        "try {\n"
+        "    $wc = New-Object System.Net.WebClient\n"
+        "    $wc.Proxy = $null\n"
+        "    $wc.Headers.Add('User-Agent', 'campus-auto-login')\n"
+        "    $body = $wc.DownloadString('" + escaped_url + "')\n"
+        "    $bytes = [System.Text.Encoding]::UTF8.GetBytes($body)\n"
+        "    [Convert]::ToBase64String($bytes)\n"
+        "} catch {\n"
+        "    Write-Error $_.Exception.Message\n"
+        "    exit 1\n"
+        "}\n"
+    )
+    tmp_path = None
     try:
-        # Use .NET WebClient with UseDefaultCredentials=false and no proxy
-        ps_cmd = (
-            '[System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12; '
-            '$wc = New-Object System.Net.WebClient; '
-            '$wc.Proxy = [System.Net.GlobalProxySelection]::GetEmptyWebProxy; '
-            '$wc.Headers.Add(\"User-Agent\", \"campus-auto-login\"); '
-            '$wc.DownloadString(\"{0}\")'
-        ).format(url.replace('"', '`"'))
-        result = os.popen(
-            'powershell.exe -NoProfile -Command "{0}"'.format(ps_cmd)
-        ).read(8192).strip()
-        if result and len(result) > 5:
-            return result
-    except Exception:
-        pass
-    return None
+        tmp = tempfile.NamedTemporaryFile(suffix=".ps1", delete=False, mode="w", encoding="utf-8")
+        tmp.write(ps_script)
+        tmp.close()
+        tmp_path = tmp.name
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", tmp_path],
+            capture_output=True, timeout=timeout + 5,
+        )
+        stderr = result.stderr.decode("utf-8", errors="replace").strip()
+        stdout = result.stdout.decode("utf-8", errors="replace").strip()
+        if result.returncode != 0:
+            return None
+        if stderr and not stdout:
+            return None
+        if not stdout:
+            return None
+        # Validate stdout is valid Base64
+        try:
+            decoded = _b64.b64decode(stdout).decode("utf-8", errors="replace")
+        except Exception:
+            return None
+        if not decoded or len(decoded) < 5:
+            return None
+        # Check for PowerShell error indicators in decoded content
+        error_indicators = [
+            "CommandNotFoundException", "ParserError", "ParentContainsErrorRecordException",
+            "不是内部或外部命令", "所在位置", "FullyQualifiedErrorId",
+        ]
+        for indicator in error_indicators:
+            if indicator in decoded:
+                return None
+        return decoded
+    except (subprocess.TimeoutExpired, Exception):
+        return None
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
 
 def _get_system_proxy_settings():
@@ -274,6 +319,7 @@ def _set_system_proxy(enable, server="", override=""):
 def _temporary_proxy_bypass_fetch(url, headers=None, timeout=10):
     """Temporarily disable system proxy, fetch, then restore. Returns text or None."""
     original = _get_system_proxy_settings()
+    proxy_was_restored = False
     try:
         # Temporarily disable system proxy
         _set_system_proxy(False)
@@ -285,26 +331,82 @@ def _temporary_proxy_bypass_fetch(url, headers=None, timeout=10):
         return None
     finally:
         # Always restore original proxy settings
-        _set_system_proxy(
+        success = _set_system_proxy(
             enable=original["ProxyEnable"],
             server=original["ProxyServer"],
             override=original["ProxyOverride"],
         )
+        if success:
+            proxy_was_restored = True
+
+
+# Cached campus network route info for route repair
+_campus_route_cache = {"ifIndex": None, "gateway": None, "source_ip": None, "metric": None}
+
+
+def _cache_campus_route(portal_base):
+    """Cache the current route info when portal is reachable, for later route repair."""
+    host = parse.urlsplit(portal_base.rstrip("/")).hostname or "10.200.84.3"
+    info = _get_portal_route_info(host)
+    if info.get("nextHop") and info.get("sourceIP"):
+        _campus_route_cache["ifIndex"] = info.get("ifIndex")
+        _campus_route_cache["gateway"] = info.get("nextHop")
+        _campus_route_cache["source_ip"] = info.get("sourceIP")
+        _campus_route_cache["metric"] = info.get("metric")
+
+
+def _try_route_repair(portal_host="10.200.84.3", timeout=3):
+    """Try to add a temporary host route to the portal using cached campus route info.
+    Returns True if portal becomes reachable after route repair."""
+    gw = _campus_route_cache.get("gateway")
+    ifidx = _campus_route_cache.get("ifIndex")
+    if not gw:
+        return False
+    # Only add a /32 host route for the specific portal IP
+    route_cmd = "route add {0} mask 255.255.255.255 {1}".format(portal_host, gw)
+    if ifidx:
+        route_cmd += " if {0}".format(ifidx)
+    try:
+        result = os.popen(route_cmd).read(512)
+        if "The requested operation requires elevation" in result or "Access is denied" in result:
+            return False
+        # Test if portal is now reachable
+        time.sleep(0.5)
+        try:
+            s = socket.create_connection((portal_host, 80), timeout=timeout)
+            s.close()
+            return True
+        except OSError:
+            return False
+    except Exception:
+        return False
+
+
+def _cleanup_route_repair(portal_host="10.200.84.3"):
+    """Remove temporary host route added by _try_route_repair."""
+    try:
+        os.popen("route delete {0}".format(portal_host)).read(256)
+    except Exception:
+        pass
 
 
 def fetch_portal_text_resilient(url, headers=None, timeout=10, purpose="status",
                                  allow_proxy_bypass=False):
-    """Resilient 4-layer fetch for campus portal URLs.
+    """Resilient multi-layer fetch for campus portal URLs.
     Layer 1: raw http.client direct
     Layer 2: interface-bound raw direct (bind to physical adapter IP)
-    Layer 3: PowerShell .NET WebClient with no proxy
-    Layer 4: temporary Windows proxy bypass (if allowed)
+    Layer 3: temporary host route repair (if cached campus route exists)
+    Layer 4: PowerShell .NET WebClient no proxy (EncodedCommand)
+    Layer 5: temporary Windows proxy bypass (if allowed)
 
     Returns (text, layer_name) on success, raises OSError if all layers fail.
     """
     if headers is None:
         headers = {"User-Agent": "Mozilla/5.0 Windows NT 10.0 Win64 x64 campus-auto-login-python", "Accept": "*/*"}
 
+    parsed = parse.urlsplit(url)
+    portal_host = parsed.hostname or "10.200.84.3"
+    portal_port = parsed.port or 80
     errors = []
 
     # Layer 1: raw http.client direct
@@ -312,36 +414,57 @@ def fetch_portal_text_resilient(url, headers=None, timeout=10, purpose="status",
         text = fetch_direct_text(url, headers=headers, timeout=timeout)
         return text, "raw_direct"
     except (OSError, ValueError) as e:
-        errors.append("raw_direct: {0}".format(e))
+        errors.append("L1_raw_direct: {0}".format(e))
 
     # Layer 2: interface-bound raw direct
-    parsed = parse.urlsplit(url)
-    portal_host = parsed.hostname or "10.200.84.3"
-    portal_port = parsed.port or 80
     src = _find_preferred_source_ip(portal_host, portal_port, timeout=min(timeout, 5))
     if src:
         try:
             text = fetch_direct_with_source(url, src[0], headers=headers, timeout=timeout)
             return text, "interface_bound({0})".format(src[0])
         except (OSError, ValueError) as e:
-            errors.append("interface_bound({0}): {1}".format(src[0], e))
+            errors.append("L2_interface_bound({0}): {1}".format(src[0], e))
     else:
-        errors.append("interface_bound: no local interface can reach portal")
+        errors.append("L2_interface_bound: no local interface can reach portal")
 
-    # Layer 3: PowerShell .NET WebClient no-proxy
+    # Layer 3: temporary host route repair
+    if _campus_route_cache.get("gateway"):
+        route_added = _try_route_repair(portal_host, timeout=min(timeout, 5))
+        if route_added:
+            try:
+                text = fetch_direct_text(url, headers=headers, timeout=timeout)
+                _cleanup_route_repair(portal_host)
+                return text, "route_repair"
+            except (OSError, ValueError) as e:
+                errors.append("L3_route_repair: route added but fetch failed: {0}".format(e))
+                _cleanup_route_repair(portal_host)
+        else:
+            errors.append("L3_route_repair: could not repair route")
+    else:
+        errors.append("L3_route_repair: no cached campus route")
+
+    # Layer 4: PowerShell .NET WebClient no proxy (EncodedCommand)
     ps_result = _powershell_no_proxy_fetch(url, timeout=min(timeout, 15))
     if ps_result:
-        return ps_result, "powershell_no_proxy"
-    errors.append("powershell_no_proxy: failed")
+        # Validate it's real JSONP/JSON, not a PowerShell error
+        try:
+            obj = jsonp_to_obj(ps_result)
+            if isinstance(obj, dict) and "result" in obj:
+                return ps_result, "powershell_no_proxy"
+        except (ValueError, json.JSONDecodeError):
+            pass
+        errors.append("L4_powershell_no_proxy: response was not valid JSONP/JSON")
+    else:
+        errors.append("L4_powershell_no_proxy: failed")
 
-    # Layer 4: temporary proxy bypass (only if allowed)
+    # Layer 5: temporary proxy bypass (only if allowed)
     if allow_proxy_bypass:
         text = _temporary_proxy_bypass_fetch(url, headers=headers, timeout=timeout)
         if text:
             return text, "temp_proxy_bypass"
-        errors.append("temp_proxy_bypass: failed")
+        errors.append("L5_temp_proxy_bypass: failed")
     else:
-        errors.append("temp_proxy_bypass: not enabled (use --allow-temporary-proxy-bypass)")
+        errors.append("L5_temp_proxy_bypass: not enabled")
 
     raise OSError("All transport layers failed for {0}: {1}".format(url, "; ".join(errors)))
 
@@ -724,11 +847,13 @@ def login_once(config, args, failure_state=None):
         else:
             return False
 
-    # Portal is reachable - reset failure counter
+    # Portal is reachable - reset failure counter and cache route for future repair
     if failure_state is not None:
         failure_state["consecutive_failures"] = 0
+    _cache_campus_route(config["portal_base"])
 
-    if status.get("attempts", 1) > 1:
+    if status.get("layer"):
+        write_log(args.log, "Portal reached via {0}.".format(status["layer"]))
         write_log(args.log, "Portal reached after {0} attempts.".format(status["attempts"]))
     if status["online"]:
         write_log(args.log, "Already online.No login needed.")
@@ -828,6 +953,8 @@ def parse_args():
     parser.add_argument("--check-wifi", action="store_true", help="Check current WiFi SSID and exit.")
     parser.add_argument("--set-campus-ssid", action="store_true", help="Save current WiFi SSID as campus SSID.")
     parser.add_argument("--campus-ssid", default="", help="Campus WiFi SSID for auto-reconnect.")
+    parser.add_argument("--force-portal-reachable", action="store_true",
+                        help="Force all transport layers to try reaching the portal.")
     return parser.parse_args()
 
 
@@ -914,14 +1041,24 @@ def _extract_portal_from_url(url):
 
 
 def _test_portal_candidate(base_url, timeout=3):
-    """Test if a URL is a reachable campus portal by checking /drcom/chkstatus."""
+    """Test if a URL is a reachable campus portal by checking /drcom/chkstatus.
+    Returns True ONLY if the response is valid JSONP/JSON with a 'result' field."""
     try:
         text = fetch_direct_text(
             "{0}/drcom/chkstatus?callback=_test&jsVersion=4.X&v=1&lang=zh".format(base_url.rstrip("/")),
             headers={"User-Agent": "Mozilla/5.0 campus-auto-login-discovery"},
             timeout=timeout,
         )
-        # Check if response looks like JSONP with result field
+        if not text or len(text.strip()) < 5:
+            return False
+        # Reject obvious error responses
+        error_indicators = [
+            "CommandNotFoundException", "ParserError", "不是内部或外部命令",
+            "ParentContainsErrorRecordException", "FullyQualifiedErrorId",
+        ]
+        for indicator in error_indicators:
+            if indicator in text:
+                return False
         obj = jsonp_to_obj(text)
         if isinstance(obj, dict) and "result" in obj:
             return True
@@ -968,7 +1105,7 @@ def _get_gateway_subnet_candidates(gateway, count=5):
 def discover_portal_base(configured_portal_base, timeout=3, log_fn=None):
     """Discover the campus portal base URL.
     Priority: configured portal -> DEFAULT_PORTAL -> gateway subnet -> NCSI redirects.
-    Returns the working portal base URL, or the configured one if nothing found.
+    Returns the working portal base URL ONLY if verified, or configured one as unverified fallback.
     """
     def _log(msg):
         if log_fn:
@@ -1017,6 +1154,8 @@ def discover_portal_base(configured_portal_base, timeout=3, log_fn=None):
         except Exception:
             continue
 
+    # No verified portal found - return configured as unverified fallback
+    _log("No verified portal found. Returning configured portal (unverified): {0}".format(configured))
     return configured
 
 
@@ -1538,6 +1677,49 @@ def main():
         write_log(args.log, "Or add to config manually: \"campus_ssid\": \"{0}\"".format(ssid))
         return 0
 
+    if args.force_portal_reachable:
+        write_log(args.log, "=== Force Portal Reachable Mode ===")
+        write_log(args.log, "Portal target: {0}".format(args.portal_base))
+        # Show current environment
+        ssid = get_current_wifi_ssid()
+        write_log(args.log, "Current Wi-Fi SSID: {0}".format(ssid or "<not connected>"))
+        gw = _get_default_gateway()
+        write_log(args.log, "Default gateway: {0}".format(gw or "unknown"))
+        proxy_server, proxy_override = _get_proxy_details()
+        write_log(args.log, "System proxy: {0}".format(proxy_server or "not set"))
+        # Try each layer explicitly
+        test_url = "{0}/drcom/chkstatus?callback=_fr&jsVersion=4.X&v=1&lang=zh".format(args.portal_base.rstrip("/"))
+        try:
+            content, layer = fetch_portal_text_resilient(
+                test_url, timeout=5, purpose="force",
+                allow_proxy_bypass=args.allow_temporary_proxy_bypass,
+            )
+            write_log(args.log, "Portal reachable via layer: {0}".format(layer))
+            # Cache the route for future use
+            _cache_campus_route(args.portal_base)
+            return 0
+        except OSError as exc:
+            write_log(args.log, "ALL LAYERS FAILED: {0}".format(exc))
+            write_log(args.log, "=== Failure Matrix ===")
+            write_log(args.log, "SSID: {0}".format(ssid or "unknown"))
+            write_log(args.log, "Gateway: {0}".format(gw or "unknown"))
+            write_log(args.log, "Proxy: {0}".format(proxy_server or "not set"))
+            # Show all local IPs
+            adapters = _get_physical_adapter_ips()
+            for ip, ifidx, name, desc, virt in adapters:
+                write_log(args.log, "  Adapter: {0} IP={1} ifIdx={2} virtual={3}".format(name, ip, ifidx, virt))
+            # Test each source IP
+            host = parse.urlsplit(args.portal_base.rstrip("/")).hostname or "10.200.84.3"
+            for ip, ifidx, name, desc, virt in adapters:
+                try:
+                    s = socket.create_connection((host, 80), timeout=3, source_address=(ip, 0))
+                    s.close()
+                    write_log(args.log, "  Source {0} ({1}): SUCCESS".format(ip, name))
+                except OSError as e:
+                    write_log(args.log, "  Source {0} ({1}): FAIL - {2}".format(ip, name, e))
+            write_log(args.log, "=== End Failure Matrix ===")
+            return 1
+
     if args.diagnose:
         lines = diagnose_portal_connectivity(args.portal_base)
         for line in lines:
@@ -1551,6 +1733,7 @@ def main():
                 allow_proxy_bypass=args.allow_temporary_proxy_bypass,
             )
             write_log(args.log, "Resilient fetch SUCCESS via layer: {0}".format(layer))
+            _cache_campus_route(args.portal_base)
         except OSError as exc:
             write_log(args.log, "Resilient fetch FAILED: {0}".format(exc))
         # Portal auto-discovery
