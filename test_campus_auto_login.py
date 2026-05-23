@@ -5,17 +5,20 @@ import os
 import unittest
 from unittest.mock import MagicMock, patch, call
 
+import campus_auto_login as campus_module
 from campus_auto_login import (
     DIRECT_OPENER,
     account_prefix,
     client_info_from_status,
     diagnose_portal_connectivity,
     discover_portal_base,
+    ensure_wifi_interface_enabled,
     ensure_process_proxy_bypass_for_portal,
     eportal_login_url,
     fetch_direct_text,
     fetch_direct_raw,
     fetch_text_with_retry,
+    fetch_portal_text_resilient,
     get_status,
     invoke_jsonp,
     invoke_url_jsonp,
@@ -24,6 +27,7 @@ from campus_auto_login import (
     normalize_interval,
     open_direct,
     query_string,
+    reconnect_campus_wifi,
     wait_for_portal_ready,
     __version__,
     _extract_portal_from_url,
@@ -32,6 +36,7 @@ from campus_auto_login import (
     _test_portal_candidate,
     _get_default_gateway,
     _get_gateway_subnet_candidates,
+    _is_wifi_power_off_error,
 )
 
 
@@ -201,6 +206,40 @@ class TestFetchDirectRaw(unittest.TestCase):
         self.assertEqual(reason, "Found")
         self.assertEqual(headers["Location"], "http://10.200.84.3/portal")
         self.assertEqual(body, "hello")
+
+
+class TestResilientCachedSource(unittest.TestCase):
+    @patch("campus_auto_login._load_campus_route_cache")
+    @patch("campus_auto_login.fetch_direct_with_source")
+    @patch("campus_auto_login.fetch_direct_text")
+    def test_uses_cached_source_after_raw_direct_fails(self, mock_direct, mock_source, mock_load):
+        old_cache = dict(campus_module._campus_route_cache)
+        old_preferred = campus_module._preferred_source_ip[0]
+        try:
+            campus_module._campus_route_cache.update({
+                "ifIndex": "6",
+                "gateway": "10.211.0.1",
+                "source_ip": "10.211.223.248",
+                "metric": "0",
+                "alias": "WLAN",
+            })
+            campus_module._preferred_source_ip[0] = None
+            mock_direct.side_effect = OSError("no route")
+            mock_source.return_value = 'cb({"result":1})'
+
+            text, layer = fetch_portal_text_resilient(
+                "http://10.200.84.3/drcom/chkstatus?callback=cb",
+                timeout=3,
+            )
+
+            self.assertEqual(text, 'cb({"result":1})')
+            self.assertEqual(layer, "cached_source(10.211.223.248)")
+            mock_source.assert_called_once()
+            self.assertEqual(mock_source.call_args[0][1], "10.211.223.248")
+        finally:
+            campus_module._campus_route_cache.clear()
+            campus_module._campus_route_cache.update(old_cache)
+            campus_module._preferred_source_ip[0] = old_preferred
 
 
 class TestInvokeJsonpUsesResilientFetch(unittest.TestCase):
@@ -421,6 +460,8 @@ class TestGetStatus(unittest.TestCase):
         self.assertEqual(status["state"], "online")
         self.assertTrue(status["online"])
         self.assertTrue(status["reachable"])
+        self.assertEqual(status["attempts"], 1)
+        self.assertEqual(status["layer"], "raw_direct")
 
     @patch("campus_auto_login.fetch_portal_text_resilient")
     def test_offline_state(self, mock_fetch):
@@ -461,9 +502,10 @@ class TestLoginOnceNetworkNotReady(unittest.TestCase):
         self.assertFalse(result)
         self.assertEqual(failure_state["consecutive_failures"], 1)
 
+    @patch("campus_auto_login._cache_campus_route")
     @patch("campus_auto_login.write_log")
     @patch("campus_auto_login.get_status")
-    def test_success_resets_failure_count(self, mock_status, mock_log):
+    def test_success_resets_failure_count(self, mock_status, mock_log, mock_cache):
         mock_status.return_value = {"state": "online", "reachable": True, "online": True, "raw": {}, "error": None, "attempts": 1}
         args = MagicMock()
         args.log = MagicMock()
@@ -472,6 +514,25 @@ class TestLoginOnceNetworkNotReady(unittest.TestCase):
         result = login_once(config, args, failure_state=failure_state)
         self.assertTrue(result)
         self.assertEqual(failure_state["consecutive_failures"], 0)
+
+    @patch("campus_auto_login._cache_campus_route")
+    @patch("campus_auto_login.write_log")
+    @patch("campus_auto_login.get_status")
+    def test_reachable_layer_without_attempts_does_not_crash(self, mock_status, mock_log, mock_cache):
+        mock_status.return_value = {
+            "state": "online",
+            "reachable": True,
+            "online": True,
+            "raw": {},
+            "error": None,
+            "layer": "raw_direct",
+        }
+        args = MagicMock()
+        args.log = MagicMock()
+        config = {"portal_base": "http://10.200.84.3"}
+        self.assertTrue(login_once(config, args, failure_state={"consecutive_failures": 1}))
+        messages = [call_args[0][1] for call_args in mock_log.call_args_list]
+        self.assertIn("Portal reached after 1 attempts.", messages)
 
 
 class TestWaitForPortalReady(unittest.TestCase):
@@ -499,6 +560,91 @@ class TestWaitForPortalReady(unittest.TestCase):
         result = wait_for_portal_ready("http://10.200.84.3", timeout_seconds=10, interval=1)
         self.assertIsNotNone(result)
         self.assertEqual(result["state"], "offline")
+
+    @patch("campus_auto_login.time.sleep")
+    @patch("campus_auto_login.reconnect_campus_wifi")
+    @patch("campus_auto_login.get_status")
+    def test_requests_wifi_reconnect_on_network_not_ready(self, mock_status, mock_reconnect, mock_sleep):
+        mock_status.side_effect = [
+            {"state": "network_not_ready", "reachable": False, "online": False},
+            {"state": "offline", "reachable": True, "online": False},
+        ]
+        mock_reconnect.return_value = True
+        result = wait_for_portal_ready(
+            "http://10.200.84.3",
+            timeout_seconds=10,
+            interval=1,
+            campus_ssid="YADX-STU",
+        )
+        self.assertEqual(result["state"], "offline")
+        mock_reconnect.assert_called_once()
+        self.assertEqual(mock_reconnect.call_args[0][0], "YADX-STU")
+
+    @patch("campus_auto_login.time.sleep")
+    @patch("campus_auto_login.reconnect_campus_wifi")
+    @patch("campus_auto_login.get_status")
+    def test_reconnect_attempt_is_limited_per_wait_window(self, mock_status, mock_reconnect, mock_sleep):
+        mock_status.return_value = {"state": "network_not_ready", "reachable": False, "online": False}
+        mock_reconnect.return_value = False
+        result = wait_for_portal_ready(
+            "http://10.200.84.3",
+            timeout_seconds=3,
+            interval=1,
+            campus_ssid="YADX-STU",
+        )
+        self.assertIsNone(result)
+        mock_reconnect.assert_called_once()
+
+
+class TestReconnectCampusWifi(unittest.TestCase):
+    @patch("campus_auto_login.subprocess.run")
+    def test_reconnect_uses_netsh_profile(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout=b"", stderr=b"")
+        self.assertTrue(reconnect_campus_wifi("YADX-STU"))
+        mock_run.assert_called_once()
+        self.assertEqual(mock_run.call_args[0][0], ["netsh", "wlan", "connect", "name=YADX-STU"])
+
+    @patch("campus_auto_login.subprocess.run")
+    @patch("campus_auto_login.get_current_wifi_ssid", return_value="")
+    @patch("campus_auto_login._load_campus_route_cache", return_value={"ssid": "?"})
+    def test_reconnect_falls_back_to_yadx_profile(self, mock_cache, mock_ssid, mock_run):
+        profiles = "    All User Profile     : YADX-STU\r\n".encode("utf-8")
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout=profiles, stderr=b""),
+            MagicMock(returncode=0, stdout=b"", stderr=b""),
+        ]
+        self.assertTrue(reconnect_campus_wifi(""))
+        self.assertEqual(mock_run.call_args_list[-1][0][0], ["netsh", "wlan", "connect", "name=YADX-STU"])
+
+    @patch("campus_auto_login.time.sleep")
+    @patch("campus_auto_login.ensure_wifi_interface_enabled")
+    @patch("campus_auto_login.subprocess.run")
+    def test_reconnect_enables_wifi_when_radio_is_powered_off(self, mock_run, mock_enable, mock_sleep):
+        mock_run.side_effect = [
+            MagicMock(
+                returncode=1,
+                stdout=b"",
+                stderr=b"WlanGetAvailableNetworkList failed because radio is off",
+            ),
+            MagicMock(returncode=0, stdout=b"", stderr=b""),
+        ]
+        self.assertTrue(reconnect_campus_wifi("YADX-STU"))
+        mock_enable.assert_called_once()
+        self.assertEqual(mock_run.call_count, 2)
+
+    def test_detects_chinese_wifi_power_off_error(self):
+        self.assertTrue(_is_wifi_power_off_error("无线局域网接口电源关闭，它不支持请求的操作。"))
+
+    @patch("campus_auto_login._enable_wifi_software_radio", return_value=True)
+    @patch("campus_auto_login._get_wifi_adapter_name", return_value="WLAN")
+    @patch("campus_auto_login.subprocess.run")
+    def test_ensure_wifi_interface_enabled_runs_enable_steps(self, mock_run, mock_adapter, mock_radio):
+        mock_run.return_value = MagicMock(returncode=0, stdout=b"", stderr=b"")
+        self.assertTrue(ensure_wifi_interface_enabled())
+        commands = [call_args[0][0] for call_args in mock_run.call_args_list]
+        self.assertIn(["netsh", "interface", "set", "interface", "name=WLAN", "admin=enabled"], commands)
+        self.assertIn(["netsh", "wlan", "set", "autoconfig", "enabled=yes", "interface=WLAN"], commands)
+        mock_radio.assert_called_once()
 
 
 class TestEnsureProcessProxyBypass(unittest.TestCase):

@@ -10,6 +10,7 @@ import queue
 import random
 import re
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -344,20 +345,76 @@ def _temporary_proxy_bypass_fetch(url, headers=None, timeout=10):
 _campus_route_cache = {"ifIndex": None, "gateway": None, "source_ip": None, "metric": None}
 
 
+def _load_campus_route_cache():
+    """Load the last known campus route from disk into memory."""
+    try:
+        if not ROUTE_CACHE.exists():
+            return None
+        with ROUTE_CACHE.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict) or not data.get("gateway"):
+            return None
+        _campus_route_cache["ifIndex"] = data.get("ifIndex")
+        _campus_route_cache["gateway"] = data.get("gateway")
+        _campus_route_cache["source_ip"] = data.get("source_ip")
+        _campus_route_cache["metric"] = data.get("metric")
+        return data
+    except Exception:
+        return None
+
+
+def _save_campus_route_cache(info):
+    """Persist non-secret campus route hints for later reconnect attempts."""
+    try:
+        previous = _load_campus_route_cache() or {}
+        current_ssid = get_current_wifi_ssid()
+        if not current_ssid:
+            current_ssid = str(previous.get("ssid") or "").strip()
+        if not current_ssid or current_ssid == "?":
+            current_ssid = _cached_or_configured_campus_ssid()
+        data = {
+            "ifIndex": info.get("ifIndex"),
+            "gateway": info.get("nextHop") or info.get("gateway"),
+            "source_ip": info.get("sourceIP") or info.get("source_ip"),
+            "metric": info.get("metric"),
+            "alias": info.get("alias"),
+            "ssid": current_ssid,
+            "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        if not data["gateway"]:
+            return False
+        with ROUTE_CACHE.open("w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception:
+        return False
+
+
 def _cache_campus_route(portal_base):
     """Cache the current route info when portal is reachable, for later route repair."""
     host = parse.urlsplit(portal_base.rstrip("/")).hostname or "10.200.84.3"
     info = _get_portal_route_info(host)
-    if info.get("nextHop") and info.get("sourceIP"):
+    if not info.get("nextHop"):
+        default_gw = _get_default_gateway()
+        if default_gw:
+            info["nextHop"] = default_gw
+    if not info.get("sourceIP"):
+        src = _find_preferred_source_ip(host, 80, timeout=1)
+        if src:
+            info["sourceIP"], info["ifIndex"], info["alias"] = src[0], src[1], src[2]
+    if info.get("nextHop"):
         _campus_route_cache["ifIndex"] = info.get("ifIndex")
         _campus_route_cache["gateway"] = info.get("nextHop")
         _campus_route_cache["source_ip"] = info.get("sourceIP")
         _campus_route_cache["metric"] = info.get("metric")
+        _save_campus_route_cache(info)
 
 
 def _try_route_repair(portal_host="10.200.84.3", timeout=3):
     """Try to add a temporary host route to the portal using cached campus route info.
     Returns True if portal becomes reachable after route repair."""
+    if not _campus_route_cache.get("gateway"):
+        _load_campus_route_cache()
     gw = _campus_route_cache.get("gateway")
     ifidx = _campus_route_cache.get("ifIndex")
     if not gw:
@@ -416,7 +473,23 @@ def fetch_portal_text_resilient(url, headers=None, timeout=10, purpose="status",
     except (OSError, ValueError) as e:
         errors.append("L1_raw_direct: {0}".format(e))
 
-    # Layer 2: interface-bound raw direct
+    # Layer 2a: cached source-IP raw direct. This covers short windows where
+    # Windows still has a campus route hint but adapter enumeration is stale.
+    _load_campus_route_cache()
+    cached_source_ip = _campus_route_cache.get("source_ip")
+    if cached_source_ip:
+        try:
+            text = fetch_direct_with_source(url, cached_source_ip, headers=headers, timeout=timeout)
+            _preferred_source_ip[0] = (
+                cached_source_ip,
+                _campus_route_cache.get("ifIndex"),
+                _campus_route_cache.get("alias") or "cached",
+            )
+            return text, "cached_source({0})".format(cached_source_ip)
+        except (OSError, ValueError) as e:
+            errors.append("L2_cached_source({0}): {1}".format(cached_source_ip, e))
+
+    # Layer 2b: interface-bound raw direct
     src = _find_preferred_source_ip(portal_host, portal_port, timeout=min(timeout, 5))
     if src:
         try:
@@ -428,6 +501,8 @@ def fetch_portal_text_resilient(url, headers=None, timeout=10, purpose="status",
         errors.append("L2_interface_bound: no local interface can reach portal")
 
     # Layer 3: temporary host route repair
+    if not _campus_route_cache.get("gateway"):
+        _load_campus_route_cache()
     if _campus_route_cache.get("gateway"):
         route_added = _try_route_repair(portal_host, timeout=min(timeout, 5))
         if route_added:
@@ -509,6 +584,7 @@ _reattach_console()
 DEFAULT_CONFIG = SCRIPT_DIR / "campus_login_py.config.json"
 DEFAULT_PS_CONFIG = SCRIPT_DIR / "campus_login.config.json"
 DEFAULT_LOG = SCRIPT_DIR / "campus_auto_login_py.log"
+ROUTE_CACHE = SCRIPT_DIR / "campus_route_cache.json"
 MIN_INTERVAL_SECONDS = 5
 MAX_INTERVAL_SECONDS = 30
 
@@ -783,6 +859,7 @@ def get_status(portal_base, allow_proxy_bypass=False):
             "raw": data,
             "error": None,
             "layer": layer,
+            "attempts": 1,
         }
     except (OSError, ValueError) as exc:
         is_socket = _is_socket_unreachable_error(exc)
@@ -794,6 +871,7 @@ def get_status(portal_base, allow_proxy_bypass=False):
             "error": str(exc),
             "is_network_unreachable": is_socket,
             "layer": None,
+            "attempts": 1,
         }
 
 
@@ -814,7 +892,8 @@ def login_once(config, args, failure_state=None):
 
         if count <= 1:
             write_log(args.log, "Portal temporarily unreachable, will retry next cycle.")
-        elif count == 2:
+            return False
+        if count == 2:
             write_log(args.log, "Portal still unreachable ({0} consecutive). Running auto-discovery...".format(count))
             discovered = discover_portal_base(
                 config["portal_base"], timeout=3,
@@ -823,10 +902,19 @@ def login_once(config, args, failure_state=None):
             if discovered.rstrip("/") != config["portal_base"].rstrip("/"):
                 write_log(args.log, "Switching to discovered portal: {0}".format(discovered))
                 config["portal_base"] = discovered
-        elif count >= 3:
+        if count >= 3:
             write_log(args.log, "Portal unreachable ({0} consecutive). Route exists but TCP failed. Waiting for network.".format(count))
+        write_log(args.log, "Waiting up to 75s for portal route recovery...")
+        recovered = wait_for_portal_ready(
+            config["portal_base"], timeout_seconds=75, interval=5,
+            log_fn=lambda msg: write_log(args.log, msg),
+            allow_proxy_bypass=allow_bypass,
+            campus_ssid=(getattr(args, "campus_ssid", "") or config.get("campus_ssid", "")),
+        )
+        if recovered is None:
             maybe_diagnose(config["portal_base"], args.log)
-        return False
+            return False
+        status = recovered
 
     if status["state"] == "portal_unreachable":
         # HTTP-level error, not transient socket
@@ -841,7 +929,7 @@ def login_once(config, args, failure_state=None):
         if discovered.rstrip("/") != config["portal_base"].rstrip("/"):
             write_log(args.log, "Switching to discovered portal: {0}".format(discovered))
             config["portal_base"] = discovered
-            status = get_status(config["portal_base"])
+            status = get_status(config["portal_base"], allow_proxy_bypass=allow_bypass)
             if not status["reachable"]:
                 return False
         else:
@@ -854,7 +942,7 @@ def login_once(config, args, failure_state=None):
 
     if status.get("layer"):
         write_log(args.log, "Portal reached via {0}.".format(status["layer"]))
-        write_log(args.log, "Portal reached after {0} attempts.".format(status["attempts"]))
+        write_log(args.log, "Portal reached after {0} attempts.".format(status.get("attempts", 1)))
     if status["online"]:
         write_log(args.log, "Already online.No login needed.")
         return True
@@ -962,20 +1050,351 @@ def parse_args():
 # WiFi SSID detection
 # ---------------------------------------------------------------------------
 
+def _decode_command_output(data):
+    """Decode netsh/PowerShell output across common Windows encodings."""
+    if not data:
+        return ""
+    if isinstance(data, str):
+        return data
+    for encoding in ("utf-8", "gbk", "mbcs"):
+        try:
+            return data.decode(encoding)
+        except (LookupError, UnicodeDecodeError):
+            continue
+    return data.decode(errors="replace")
+
+
 def get_current_wifi_ssid():
     """Get the current WiFi SSID (read-only, best-effort)."""
     try:
-        out = os.popen('netsh wlan show interfaces').read(4096)
+        result = subprocess.run(
+            ["netsh", "wlan", "show", "interfaces"],
+            capture_output=True,
+            timeout=10,
+        )
+        out = _decode_command_output(result.stdout)
         for line in out.splitlines():
             if "SSID" in line and "BSSID" not in line:
                 parts = line.split(":", 1)
                 if len(parts) >= 2:
                     ssid = parts[1].strip()
-                    if ssid:
+                    if ssid and ssid != "?":
                         return ssid
     except Exception:
         pass
     return ""
+
+
+def _get_wifi_profiles():
+    """Return saved Wi-Fi profile names from netsh output."""
+    profiles = []
+    try:
+        result = subprocess.run(
+            ["netsh", "wlan", "show", "profiles"],
+            capture_output=True,
+            timeout=10,
+        )
+        text = _decode_command_output(result.stdout)
+        for line in text.splitlines():
+            if ":" not in line:
+                continue
+            left, right = line.split(":", 1)
+            name = right.strip()
+            if name and ("Profile" in left or "配置文件" in left):
+                profiles.append(name)
+    except Exception:
+        pass
+    return profiles
+
+
+def _cached_or_configured_campus_ssid(campus_ssid=""):
+    """Return configured SSID or the last cached campus SSID."""
+    if campus_ssid:
+        return campus_ssid
+    cached = _load_campus_route_cache()
+    ssid = str((cached or {}).get("ssid") or "").strip()
+    if ssid and ssid not in {"?", "<not connected>"}:
+        return ssid
+    current = get_current_wifi_ssid()
+    if current:
+        return current
+    profiles = _get_wifi_profiles()
+    for profile in profiles:
+        if profile.lower() == "yadx-stu":
+            return profile
+    for profile in profiles:
+        if "yadx" in profile.lower() or "yau" in profile.lower():
+            return profile
+    return ""
+
+
+def _is_wifi_power_off_error(text):
+    """Return True when Windows reports WLAN radio/interface power is off."""
+    lowered = (text or "").lower()
+    return (
+        "无线局域网接口电源关闭" in text
+        or "wlangetavailablenetworklist" in lowered
+        or ("radio" in lowered and "off" in lowered)
+        or ("power" in lowered and "off" in lowered)
+    )
+
+
+def _get_wifi_adapter_name():
+    """Return the most likely Windows Wi-Fi adapter name."""
+    try:
+        ps = (
+            "$a=Get-NetAdapter | Where-Object {"
+            "$_.Name -eq 'WLAN' -or $_.InterfaceDescription -match 'Wi-Fi|Wireless|802\\.11'"
+            "} | Sort-Object Status,Name | Select-Object -First 1 -ExpandProperty Name;"
+            "if($a){$a}"
+        )
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-Command", ps],
+            capture_output=True,
+            timeout=10,
+        )
+        name = _decode_command_output(result.stdout).strip().splitlines()
+        if name:
+            first = name[0].strip()
+            if first:
+                return first
+    except Exception:
+        pass
+    try:
+        result = subprocess.run(
+            ["netsh", "wlan", "show", "interfaces"],
+            capture_output=True,
+            timeout=10,
+        )
+        text = _decode_command_output(result.stdout)
+        for line in text.splitlines():
+            if ":" not in line:
+                continue
+            left, right = line.split(":", 1)
+            if left.strip().lower() == "name" or left.strip() == "名称":
+                name = right.strip()
+                if name:
+                    return name
+    except Exception:
+        pass
+    return "WLAN"
+
+
+class _GUID(ctypes.Structure):
+    _fields_ = [
+        ("Data1", wintypes.DWORD),
+        ("Data2", wintypes.WORD),
+        ("Data3", wintypes.WORD),
+        ("Data4", ctypes.c_ubyte * 8),
+    ]
+
+
+class _WLAN_INTERFACE_INFO(ctypes.Structure):
+    _fields_ = [
+        ("InterfaceGuid", _GUID),
+        ("strInterfaceDescription", ctypes.c_wchar * 256),
+        ("isState", wintypes.DWORD),
+    ]
+
+
+class _WLAN_INTERFACE_INFO_LIST(ctypes.Structure):
+    _fields_ = [
+        ("dwNumberOfItems", wintypes.DWORD),
+        ("dwIndex", wintypes.DWORD),
+        ("InterfaceInfo", _WLAN_INTERFACE_INFO * 1),
+    ]
+
+
+class _WLAN_PHY_RADIO_STATE(ctypes.Structure):
+    _fields_ = [
+        ("dwPhyIndex", wintypes.DWORD),
+        ("dot11SoftwareRadioState", wintypes.DWORD),
+        ("dot11HardwareRadioState", wintypes.DWORD),
+    ]
+
+
+class _WLAN_RADIO_STATE(ctypes.Structure):
+    _fields_ = [
+        ("dwNumberOfPhys", wintypes.DWORD),
+        ("PhyRadioState", _WLAN_PHY_RADIO_STATE * 64),
+    ]
+
+
+def _wlan_error_message(code):
+    try:
+        return ctypes.FormatError(code).strip()
+    except Exception:
+        return str(code)
+
+
+def _query_wifi_phy_indices(wlanapi, client_handle, interface_guid):
+    """Return PHY indices for an interface before setting software radio state."""
+    data_size = wintypes.DWORD()
+    opcode_type = wintypes.DWORD()
+    data_ptr = ctypes.c_void_p()
+    result = wlanapi.WlanQueryInterface(
+        client_handle,
+        ctypes.byref(interface_guid),
+        4,  # wlan_intf_opcode_radio_state
+        None,
+        ctypes.byref(data_size),
+        ctypes.byref(data_ptr),
+        ctypes.byref(opcode_type),
+    )
+    if result != 0 or not data_ptr.value:
+        return [0]
+    try:
+        radio_state = ctypes.cast(data_ptr, ctypes.POINTER(_WLAN_RADIO_STATE)).contents
+        count = min(int(radio_state.dwNumberOfPhys), 64)
+        indices = []
+        for i in range(count):
+            indices.append(int(radio_state.PhyRadioState[i].dwPhyIndex))
+        return indices or [0]
+    finally:
+        wlanapi.WlanFreeMemory(data_ptr)
+
+
+def _enable_wifi_software_radio(log_fn=None):
+    """Turn on Wi-Fi software radio through Native Wi-Fi API when available."""
+    client_handle = wintypes.HANDLE()
+    negotiated_version = wintypes.DWORD()
+    interface_list = ctypes.POINTER(_WLAN_INTERFACE_INFO_LIST)()
+    try:
+        wlanapi = ctypes.WinDLL("wlanapi")
+        wlanapi.WlanOpenHandle.restype = wintypes.DWORD
+        wlanapi.WlanEnumInterfaces.restype = wintypes.DWORD
+        wlanapi.WlanSetInterface.restype = wintypes.DWORD
+        wlanapi.WlanQueryInterface.restype = wintypes.DWORD
+        result = wlanapi.WlanOpenHandle(2, None, ctypes.byref(negotiated_version), ctypes.byref(client_handle))
+        if result != 0:
+            if log_fn:
+                log_fn("Native Wi-Fi open failed: {0}".format(_wlan_error_message(result)))
+            return False
+        result = wlanapi.WlanEnumInterfaces(client_handle, None, ctypes.byref(interface_list))
+        if result != 0 or not interface_list:
+            if log_fn:
+                log_fn("Native Wi-Fi interface enumeration failed: {0}".format(_wlan_error_message(result)))
+            return False
+        count = int(interface_list.contents.dwNumberOfItems)
+        base = ctypes.addressof(interface_list.contents.InterfaceInfo)
+        interfaces = (_WLAN_INTERFACE_INFO * count).from_address(base)
+        any_success = False
+        for interface_info in interfaces:
+            description = interface_info.strInterfaceDescription
+            phy_indices = _query_wifi_phy_indices(wlanapi, client_handle, interface_info.InterfaceGuid)
+            for phy_index in phy_indices:
+                radio_state = _WLAN_PHY_RADIO_STATE(
+                    wintypes.DWORD(phy_index),
+                    wintypes.DWORD(1),  # dot11_radio_state_on
+                    wintypes.DWORD(1),
+                )
+                result = wlanapi.WlanSetInterface(
+                    client_handle,
+                    ctypes.byref(interface_info.InterfaceGuid),
+                    4,  # wlan_intf_opcode_radio_state
+                    ctypes.sizeof(radio_state),
+                    ctypes.byref(radio_state),
+                    None,
+                )
+                if result == 0:
+                    any_success = True
+                elif log_fn:
+                    log_fn("Native Wi-Fi radio enable failed on {0}: {1}".format(
+                        description or "unknown", _wlan_error_message(result)))
+        return any_success
+    except Exception as exc:
+        if log_fn:
+            log_fn("Native Wi-Fi radio enable failed: {0}".format(exc))
+        return False
+    finally:
+        try:
+            if interface_list:
+                ctypes.WinDLL("wlanapi").WlanFreeMemory(interface_list)
+        except Exception:
+            pass
+        try:
+            if client_handle:
+                ctypes.WinDLL("wlanapi").WlanCloseHandle(client_handle, None)
+        except Exception:
+            pass
+
+
+def ensure_wifi_interface_enabled(log_fn=None):
+    """Best-effort enable of the Windows Wi-Fi adapter/autoconfig service."""
+    adapter_name = _get_wifi_adapter_name()
+    if not adapter_name:
+        return False
+    if log_fn:
+        log_fn("Attempting to enable Wi-Fi interface: {0}".format(adapter_name))
+    commands = [
+        ["netsh", "interface", "set", "interface", "name={0}".format(adapter_name), "admin=enabled"],
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-Command",
+            "Enable-NetAdapter -Name '{0}' -Confirm:$false -ErrorAction SilentlyContinue".format(
+                adapter_name.replace("'", "''")
+            ),
+        ],
+        ["netsh", "wlan", "set", "autoconfig", "enabled=yes", "interface={0}".format(adapter_name)],
+    ]
+    any_success = False
+    for command in commands:
+        try:
+            result = subprocess.run(command, capture_output=True, timeout=15)
+            if result.returncode == 0:
+                any_success = True
+            elif log_fn:
+                err = _decode_command_output(result.stderr or result.stdout).strip()
+                if err:
+                    log_fn("Wi-Fi enable step failed: {0}".format(err))
+        except Exception as exc:
+            if log_fn:
+                log_fn("Wi-Fi enable step failed: {0}".format(exc))
+    if _enable_wifi_software_radio(log_fn=log_fn):
+        any_success = True
+    return any_success
+
+
+def _run_netsh_wifi_connect(ssid):
+    return subprocess.run(
+        ["netsh", "wlan", "connect", "name={0}".format(ssid)],
+        capture_output=True,
+        timeout=15,
+    )
+
+
+def reconnect_campus_wifi(campus_ssid="", log_fn=None):
+    """Reconnect the known campus Wi-Fi profile with netsh."""
+    ssid = _cached_or_configured_campus_ssid(campus_ssid)
+    if not ssid:
+        return False
+    try:
+        if log_fn:
+            log_fn('Attempting Wi-Fi reconnect: {0}'.format(ssid))
+        result = _run_netsh_wifi_connect(ssid)
+        if result.returncode == 0:
+            if log_fn:
+                log_fn('Wi-Fi reconnect requested for SSID: {0}'.format(ssid))
+            return True
+        err = _decode_command_output(result.stderr or result.stdout).strip()
+        if _is_wifi_power_off_error(err):
+            if log_fn:
+                log_fn("Wi-Fi interface appears powered off. Trying to enable it before reconnect.")
+            ensure_wifi_interface_enabled(log_fn=log_fn)
+            time.sleep(3)
+            result = _run_netsh_wifi_connect(ssid)
+            if result.returncode == 0:
+                if log_fn:
+                    log_fn('Wi-Fi reconnect requested for SSID: {0}'.format(ssid))
+                return True
+            err = _decode_command_output(result.stderr or result.stdout).strip()
+        if log_fn:
+            log_fn('Wi-Fi reconnect request failed: {0}'.format(err or result.returncode))
+    except Exception as exc:
+        if log_fn:
+            log_fn('Wi-Fi reconnect request failed: {0}'.format(exc))
+    return False
 
 
 def check_wifi_and_warn(campus_ssid, log_fn=None):
@@ -1069,6 +1488,18 @@ def _test_portal_candidate(base_url, timeout=3):
 
 def _get_default_gateway():
     """Get the default gateway IP (read-only, best-effort)."""
+    try:
+        output = os.popen(
+            'powershell.exe -NoProfile -Command "'
+            'Get-NetRoute -AddressFamily IPv4 -DestinationPrefix \'0.0.0.0/0\' -ErrorAction SilentlyContinue | '
+            'Sort-Object RouteMetric | Select-Object -First 1 | ForEach-Object { $_.NextHop }"'
+        ).read(512).strip()
+        for line in output.splitlines():
+            gw = line.strip()
+            if gw and gw != "0.0.0.0" and re.match(r"^\d{1,3}(?:\.\d{1,3}){3}$", gw):
+                return gw
+    except Exception:
+        pass
     try:
         output = os.popen("route print 0.0.0.0").read(2048)
         for line in output.splitlines():
@@ -1403,23 +1834,69 @@ def maybe_diagnose(portal_base, log_path):
         return
     _last_diagnose_time = now
     diagnose_portal_connectivity(portal_base, log_fn=lambda msg: write_log(log_path, msg))
+    log_portal_failure_matrix(portal_base, log_fn=lambda msg: write_log(log_path, msg))
+
+
+def log_portal_failure_matrix(portal_base, log_fn=None):
+    """Log concrete route/source-IP evidence after resilient transport fails."""
+    def _log(msg):
+        if log_fn:
+            log_fn(msg)
+
+    host = parse.urlsplit(portal_base.rstrip("/")).hostname or "10.200.84.3"
+    proxy_server, _proxy_override = _get_proxy_details()
+    cached = _load_campus_route_cache()
+    _log("=== Failure Matrix ===")
+    _log("SSID: {0}".format(get_current_wifi_ssid() or "unknown"))
+    _log("Gateway: {0}".format(_get_default_gateway() or "unknown"))
+    _log("Proxy: {0}".format(proxy_server or "not set"))
+    if cached:
+        _log("Cached campus route: gateway={0}, source_ip={1}, ifIndex={2}, ssid={3}, updated_at={4}".format(
+            cached.get("gateway") or "?", cached.get("source_ip") or "?",
+            cached.get("ifIndex") or "?", cached.get("ssid") or "?",
+            cached.get("updated_at") or "?"))
+        cached_ip = cached.get("source_ip")
+        if cached_ip:
+            try:
+                s = socket.create_connection((host, 80), timeout=3, source_address=(cached_ip, 0))
+                s.close()
+                _log("  Cached source {0}: SUCCESS".format(cached_ip))
+            except OSError as e:
+                _log("  Cached source {0}: FAIL - {1}".format(cached_ip, e))
+    adapters = _get_physical_adapter_ips()
+    for ip, ifidx, name, desc, virt in adapters:
+        _log("  Adapter: {0} IP={1} ifIdx={2} virtual={3}".format(name, ip, ifidx, virt))
+    for ip, ifidx, name, desc, virt in adapters:
+        try:
+            s = socket.create_connection((host, 80), timeout=3, source_address=(ip, 0))
+            s.close()
+            _log("  Source {0} ({1}): SUCCESS".format(ip, name))
+        except OSError as e:
+            _log("  Source {0} ({1}): FAIL - {2}".format(ip, name, e))
+    _log("=== End Failure Matrix ===")
 
 
 def wait_for_portal_ready(portal_base, timeout_seconds=60, interval=5, log_fn=None,
-                           allow_proxy_bypass=False):
+                           allow_proxy_bypass=False, campus_ssid=""):
     """Wait for the portal to become reachable. Returns status dict when ready, or None on timeout."""
     deadline = time.time() + timeout_seconds
     attempt = 0
+    reconnect_requested = False
     while time.time() < deadline:
         attempt += 1
         status = get_status(portal_base, allow_proxy_bypass=allow_proxy_bypass)
         if status["state"] in ("online", "offline"):
+            status["attempts"] = attempt
+            _cache_campus_route(portal_base)
             if log_fn:
                 log_fn("Portal reachable after {0}s ({1} attempts) via {2}.".format(
                     int(attempt * interval), attempt, status.get("layer", "?")))
             return status
         if log_fn and attempt == 1:
             log_fn("Waiting for portal to become reachable (timeout={0}s)...".format(timeout_seconds))
+        if not reconnect_requested and status["state"] == "network_not_ready":
+            reconnect_campus_wifi(campus_ssid, log_fn=log_fn)
+            reconnect_requested = True
         remaining = deadline - time.time()
         sleep_time = min(interval, max(1, remaining))
         if sleep_time <= 0:
@@ -1687,37 +2164,32 @@ def main():
         write_log(args.log, "Default gateway: {0}".format(gw or "unknown"))
         proxy_server, proxy_override = _get_proxy_details()
         write_log(args.log, "System proxy: {0}".format(proxy_server or "not set"))
-        # Try each layer explicitly
+        # Try each layer explicitly, but allow time for Wi-Fi/DHCP route recovery.
         test_url = "{0}/drcom/chkstatus?callback=_fr&jsVersion=4.X&v=1&lang=zh".format(args.portal_base.rstrip("/"))
+        deadline = time.time() + 75
+        last_error = None
+        attempt = 0
+        while time.time() < deadline:
+            attempt += 1
+            try:
+                content, layer = fetch_portal_text_resilient(
+                    test_url, timeout=5, purpose="force",
+                    allow_proxy_bypass=args.allow_temporary_proxy_bypass,
+                )
+                write_log(args.log, "Portal reachable via layer: {0}".format(layer))
+                _cache_campus_route(args.portal_base)
+                return 0
+            except OSError as exc:
+                last_error = exc
+                if attempt == 1:
+                    write_log(args.log, "Portal not reachable yet. Waiting for campus route/Wi-Fi recovery up to 75s...")
+                    reconnect_campus_wifi(args.campus_ssid, log_fn=lambda msg: write_log(args.log, msg))
+                time.sleep(5)
         try:
-            content, layer = fetch_portal_text_resilient(
-                test_url, timeout=5, purpose="force",
-                allow_proxy_bypass=args.allow_temporary_proxy_bypass,
-            )
-            write_log(args.log, "Portal reachable via layer: {0}".format(layer))
-            # Cache the route for future use
-            _cache_campus_route(args.portal_base)
-            return 0
+            raise last_error or OSError("portal unreachable")
         except OSError as exc:
-            write_log(args.log, "ALL LAYERS FAILED: {0}".format(exc))
-            write_log(args.log, "=== Failure Matrix ===")
-            write_log(args.log, "SSID: {0}".format(ssid or "unknown"))
-            write_log(args.log, "Gateway: {0}".format(gw or "unknown"))
-            write_log(args.log, "Proxy: {0}".format(proxy_server or "not set"))
-            # Show all local IPs
-            adapters = _get_physical_adapter_ips()
-            for ip, ifidx, name, desc, virt in adapters:
-                write_log(args.log, "  Adapter: {0} IP={1} ifIdx={2} virtual={3}".format(name, ip, ifidx, virt))
-            # Test each source IP
-            host = parse.urlsplit(args.portal_base.rstrip("/")).hostname or "10.200.84.3"
-            for ip, ifidx, name, desc, virt in adapters:
-                try:
-                    s = socket.create_connection((host, 80), timeout=3, source_address=(ip, 0))
-                    s.close()
-                    write_log(args.log, "  Source {0} ({1}): SUCCESS".format(ip, name))
-                except OSError as e:
-                    write_log(args.log, "  Source {0} ({1}): FAIL - {2}".format(ip, name, e))
-            write_log(args.log, "=== End Failure Matrix ===")
+            write_log(args.log, "ALL LAYERS FAILED after 75s: {0}".format(exc))
+            log_portal_failure_matrix(args.portal_base, log_fn=lambda msg: write_log(args.log, msg))
             return 1
 
     if args.diagnose:
@@ -1766,10 +2238,12 @@ def main():
             config["portal_base"], timeout_seconds=60, interval=5,
             log_fn=lambda msg: write_log(args.log, msg),
             allow_proxy_bypass=args.allow_temporary_proxy_bypass,
+            campus_ssid=campus_ssid,
         )
         if status is None:
             write_log(args.log, "Portal not reachable after 60s. Campus network may not be connected.")
             diagnose_portal_connectivity(config["portal_base"], log_fn=lambda msg: write_log(args.log, msg))
+            log_portal_failure_matrix(config["portal_base"], log_fn=lambda msg: write_log(args.log, msg))
             return 1
         if status["online"]:
             write_log(args.log, "Already online. No login needed.")

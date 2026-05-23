@@ -1,6 +1,7 @@
 # 配置文件（含加密密码）
 campus_login.config.json
 campus_login_py.config.json
+campus_route_cache.json
 
 # 日志文件
 campus_auto_login.log

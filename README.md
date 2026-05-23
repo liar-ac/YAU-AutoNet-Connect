@@ -12,6 +12,8 @@
 [![DPAPI](https://img.shields.io/badge/DPAPI-密码加密-2EA44F?style=for-the-badge&logo=letsencrypt&logoColor=white)]()
 [![PyInstaller](https://img.shields.io/badge/PyInstaller-单文件打包-3572A5?style=for-the-badge)](campus_auto_login.spec)
 [![License](https://img.shields.io/badge/License-MIT-00A86B?style=for-the-badge)](LICENSE)
+[![CI](https://img.shields.io/github/actions/workflow/status/liar-ac/YAU-AutoNet-Connect/ci.yml?branch=master&style=for-the-badge&label=CI)](https://github.com/liar-ac/YAU-AutoNet-Connect/actions)
+[![Release](https://img.shields.io/github/v/release/liar-ac/YAU-AutoNet-Connect?style=for-the-badge)](https://github.com/liar-ac/YAU-AutoNet-Connect/releases)
 
 <p>
 <a href="#快速开始">快速开始</a> ·
@@ -44,8 +46,10 @@ YAU-AutoNet-Connect 是一个面向延安大学校园网的自动登录工具，
 |---|---|
 | 系统托盘后台运行 | 双击 exe 直接最小化到托盘，无终端窗口 |
 | 自动检测与登录 | 在线时跳过，离线时自动调用认证接口登录 |
-| Clash 系统代理兼容 | 4层兜底传输栈（raw direct → 网卡绑定 → PowerShell no-proxy → 临时代理旁路），确保系统代理开启时仍能访问校园网网关 |
-| Portal 自动发现 | 默认网关不可达时，自动尝试默认地址、网关子网、NCSI 探测发现校园网认证入口 |
+| Clash 系统代理兼容 | raw direct、缓存源IP、网卡绑定、路由修复、PowerShell no-proxy、临时代理旁路多层兜底，系统代理开启时仍优先直连校园网网关 |
+| Wi-Fi 自动恢复 | 认证退出后出现 Windows 路由丢失或 WLAN 软件无线电关闭时，自动尝试启用 WLAN 并重连校园网 SSID |
+| Portal 自动发现 | 默认网关不可达时，自动尝试配置地址、默认地址、网关子网、NCSI 探测发现校园网认证入口 |
+| CLI 诊断版 | `campus_auto_login_cli.exe`提供实时命令行输出，便于定位代理、路由、网卡、SSID、portal可达性问题 |
 | 实时日志窗口 | 托盘右键菜单打开，实时显示运行日志 |
 | 开机自启 | 托盘右键菜单一键切换，写入 Windows 注册表 |
 | 防重复运行 | Windows Mutex 保护，重复启动时弹窗提示 |
@@ -107,7 +111,7 @@ YAU-AutoNet-Connect 是一个面向延安大学校园网的自动登录工具，
 
 程序运行时会自动检测网络状态：在线时跳过，离线时尝试登录。日志超过 1MB 会自动归档为 `.log.old`。
 
-> **v1.0.4 说明：** 本次更新没有改变启动方式和后台运行方式。双击 exe 后仍在系统托盘静默运行，不需要长期打开终端窗口。开机自启后同样在后台静默运行。v1.0.4 增加了 portal 自动发现能力，默认网关不可达时会自动尝试发现校园网认证入口。
+> **v1.0.4 说明：** 本次更新没有改变启动方式和后台运行方式。双击 exe 后仍在系统托盘静默运行，不需要长期打开终端窗口。v1.0.4 重点增强 Clash 系统代理开启场景下的 portal 直连、路由恢复、Wi-Fi 自动重连和故障诊断能力。
 
 ---
 
@@ -129,6 +133,24 @@ exe 和 Python 脚本均支持以下命令：
 
 # 检查一次，离线时自动登录
 .\campus_auto_login.exe --once
+
+# 命令行实时输出版，推荐用于排障
+.\campus_auto_login_cli.exe --once --allow-temporary-proxy-bypass
+
+# 强制验证校园网网关可达性
+.\campus_auto_login_cli.exe --force-portal-reachable --allow-temporary-proxy-bypass
+
+# 输出详细连通性诊断
+.\campus_auto_login_cli.exe --diagnose --allow-temporary-proxy-bypass
+
+# 查看当前 Wi-Fi SSID
+.\campus_auto_login_cli.exe --check-wifi
+
+# 保存当前 Wi-Fi 为校园网 SSID
+.\campus_auto_login_cli.exe --set-campus-ssid
+
+# 显式指定校园网 SSID，用于自动重连
+.\campus_auto_login_cli.exe --once --campus-ssid "YADX-STU"
 
 # 以指定间隔持续监控（5-30 秒）
 .\campus_auto_login.exe --interval 30
@@ -201,10 +223,17 @@ pip install -r requirements-dev.txt
 
 ```powershell
 pip install -r requirements-dev.txt
-pyinstaller --clean campus_auto_login.spec
+python -m pytest test_campus_auto_login.py -q
+pyinstaller campus_auto_login.spec
+pyinstaller campus_auto_login_cli.spec
 ```
 
-打包产物在 `dist/campus_auto_login.exe`。
+打包产物在 `dist/`：
+
+| 文件 | 用途 |
+|---|---|
+| `campus_auto_login.exe` | 托盘后台版，适合日常双击运行 |
+| `campus_auto_login_cli.exe` | 命令行诊断版，适合 `--once`、`--diagnose`、`--force-portal-reachable` |
 
 如需监听代码变更自动重新打包：
 
@@ -238,6 +267,7 @@ python watch_build.py
 - 如果提示"已在运行中"，检查任务管理器中是否已有 `campus_auto_login.exe` 进程
 - 如果只开启 Clash 系统代理，不需要手动关闭 Clash，本工具访问校园网网关时会自动直连
 - 如果开启 TUN/虚拟网卡模式，仍建议在 Clash 规则中给校园网网关和内网 IP 段添加 DIRECT 规则
+- 如果 Windows 报告“无线局域网接口电源关闭”，程序会尝试启用 WLAN 软件无线电并重连校园网；硬件无线开关、飞行模式或驱动级禁用仍需用户手动恢复
 - 不要把配置文件（`campus_login_py.config.json`、`campus_login.config.json`）和日志文件上传到 GitHub
 
 ---
@@ -252,6 +282,7 @@ python watch_build.py
 | PowerShell 版无托盘 | PowerShell 版不支持系统托盘、日志窗口和开机自启菜单 |
 | 日志无远程上报 | 日志仅写入本地文件，不支持远程查看或上报 |
 | TUN/虚拟网卡模式 | 本版本主要解决系统代理场景；TUN/虚拟网卡属于更底层流量接管，仍需在 Clash 规则中配置 DIRECT |
+| 硬件无线禁用 | 程序只能尝试恢复 Windows 软件层 WLAN；硬件开关、飞行模式、驱动禁用无法强制绕过 |
 
 ---
 
@@ -266,8 +297,9 @@ python watch_build.py
 | 托盘图标找不到 | 查看任务栏隐藏图标区域，或检查任务管理器 |
 | 提示"已在运行中" | 已有实例在运行，任务管理器结束已有进程 |
 | `--check` 显示 Offline | 确认已连接校园网，尝试运行 `--once` |
-| 开启 Clash 系统代理后提示 Portal unreachable | 系统代理可能导致程序访问 `10.200.84.3` 时走代理，代理无法访问校园网内网网关。v1.0.2 起 Python 版已强制直连校园网网关。如仍失败，请检查是否开启了 TUN/虚拟网卡模式，并在 Clash 规则中加入以下 DIRECT 规则（见下方示例） |
-| v1.0.3 仍提示 WinError 10065 | WinError 10065 表示本机直连目标主机时网络不可达。若已使用原生直连 HTTP 仍失败，说明问题可能不只是系统代理，而是本机到校园网网关没有路由。排查：1. 确认电脑已连接校园网 WiFi 或网线；2. 确认 portal 地址仍为 `10.200.84.3`；3. 尝试浏览器打开 `http://10.200.84.3`；4. 运行 `--diagnose` 查看诊断结果；5. 检查是否存在 TUN/虚拟网卡/安全软件拦截；6. v1.0.4 会自动尝试发现可用的 portal 地址 |
+| 开启 Clash 系统代理后提示 Portal unreachable | 先运行 `campus_auto_login_cli.exe --force-portal-reachable --allow-temporary-proxy-bypass`。v1.0.4 会优先使用 raw direct 直连，并在失败时尝试缓存源IP、网卡绑定、路由修复、PowerShell no-proxy 和临时代理旁路 |
+| `WinError 10065` | 表示 Windows 认为 `10.200.84.3` 不可路由。v1.0.4 会等待路由恢复、尝试重连校园网 Wi-Fi，并输出 Failure Matrix。仍失败时请检查 WLAN 是否被硬件/飞行模式禁用 |
+| 日志出现“无线局域网接口电源关闭” | 程序会尝试启用 WLAN 接口和软件无线电后重连。若仍失败，说明 Windows 不允许软件恢复，需要手动打开 Wi-Fi 或关闭飞行模式 |
 | 自动发现的 portal 地址不正确 | 使用 `--portal-base http://x.x.x.x` 手动指定正确的校园网网关地址 |
 
 **Clash 内网直连规则示例**（适用于 TUN/虚拟网卡模式）：

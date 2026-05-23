@@ -18,6 +18,25 @@ cd YAU-AutoNet-Connect
 pip install -r requirements-dev.txt
 ```
 
+## 本地验证
+
+提交前至少运行：
+
+```powershell
+python -m py_compile campus_auto_login.py
+python -m py_compile watch_build.py
+python -m pytest test_campus_auto_login.py -q
+```
+
+如果改动涉及Windows网络、Clash系统代理、portal可达性或Wi-Fi恢复，请在Windows环境额外验证：
+
+```powershell
+.\dist\campus_auto_login_cli.exe --force-portal-reachable --allow-temporary-proxy-bypass
+.\dist\campus_auto_login_cli.exe --once --allow-temporary-proxy-bypass
+```
+
+请在PR中写清楚是否开启ClashVerge系统代理、是否开启TUN、当前校园网SSID以及关键日志结果。
+
 ## 提交规范
 
 使用语义化提交信息：
@@ -33,3 +52,5 @@ pip install -r requirements-dev.txt
 - 不要提交配置文件（含密码）、日志文件、打包产物
 - 不要改变默认登录逻辑，除非能证明原有行为是 bug
 - 修改后请确保 `python campus_auto_login.py --help` 和 `--check` 仍可正常运行
+- 涉及系统代理、注册表、WLAN、路由表的改动必须说明风险、恢复方式和验证结果
+- 新增命令行参数时同步更新 README、CHANGELOG、Release Notes 和测试

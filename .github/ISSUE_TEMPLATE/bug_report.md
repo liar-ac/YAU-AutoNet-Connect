@@ -28,6 +28,21 @@ labels: bug
 - Windows 版本：
 - exe 版本 / commit：
 - 校园网网关地址：
+- 当前 Wi-Fi SSID：
+- 是否开启 ClashVerge 系统代理：
+- 是否开启 TUN/虚拟网卡模式：
+- 系统代理地址（如 `127.0.0.1:7897`）：
+
+## 诊断输出
+
+请优先运行：
+
+```powershell
+.\campus_auto_login_cli.exe --force-portal-reachable --allow-temporary-proxy-bypass
+.\campus_auto_login_cli.exe --once --allow-temporary-proxy-bypass
+```
+
+粘贴完整输出，尤其是 `Failure Matrix` 片段。
 
 ## 日志
 
