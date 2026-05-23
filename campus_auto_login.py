@@ -228,7 +228,7 @@ def _powershell_no_proxy_fetch(url, timeout=10):
         tmp_path = tmp.name
         result = subprocess.run(
             ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", tmp_path],
-            capture_output=True, timeout=timeout + 5,
+            capture_output=True, timeout=timeout + 5, creationflags=subprocess.CREATE_NO_WINDOW,
         )
         stderr = result.stderr.decode("utf-8", errors="replace").strip()
         stdout = result.stdout.decode("utf-8", errors="replace").strip()
@@ -1071,6 +1071,7 @@ def get_current_wifi_ssid():
             ["netsh", "wlan", "show", "interfaces"],
             capture_output=True,
             timeout=10,
+            creationflags=subprocess.CREATE_NO_WINDOW,
         )
         out = _decode_command_output(result.stdout)
         for line in out.splitlines():
@@ -1093,6 +1094,7 @@ def _get_wifi_profiles():
             ["netsh", "wlan", "show", "profiles"],
             capture_output=True,
             timeout=10,
+            creationflags=subprocess.CREATE_NO_WINDOW,
         )
         text = _decode_command_output(result.stdout)
         for line in text.splitlines():
@@ -1152,6 +1154,7 @@ def _get_wifi_adapter_name():
             ["powershell.exe", "-NoProfile", "-Command", ps],
             capture_output=True,
             timeout=10,
+            creationflags=subprocess.CREATE_NO_WINDOW,
         )
         name = _decode_command_output(result.stdout).strip().splitlines()
         if name:
@@ -1165,6 +1168,7 @@ def _get_wifi_adapter_name():
             ["netsh", "wlan", "show", "interfaces"],
             capture_output=True,
             timeout=10,
+            creationflags=subprocess.CREATE_NO_WINDOW,
         )
         text = _decode_command_output(result.stdout)
         for line in text.splitlines():
@@ -1341,7 +1345,7 @@ def ensure_wifi_interface_enabled(log_fn=None):
     any_success = False
     for command in commands:
         try:
-            result = subprocess.run(command, capture_output=True, timeout=15)
+            result = subprocess.run(command, capture_output=True, timeout=15, creationflags=subprocess.CREATE_NO_WINDOW)
             if result.returncode == 0:
                 any_success = True
             elif log_fn:
@@ -1361,6 +1365,7 @@ def _run_netsh_wifi_connect(ssid):
         ["netsh", "wlan", "connect", "name={0}".format(ssid)],
         capture_output=True,
         timeout=15,
+        creationflags=subprocess.CREATE_NO_WINDOW,
     )
 
 
