@@ -8,7 +8,9 @@ from campus_auto_login import (
     DIRECT_OPENER,
     account_prefix,
     client_info_from_status,
+    diagnose_portal_connectivity,
     eportal_login_url,
+    fetch_direct_text,
     invoke_jsonp,
     invoke_url_jsonp,
     jsonp_to_obj,
@@ -95,7 +97,7 @@ class TestClientInfoFromStatus(unittest.TestCase):
 
 
 class TestDirectOpener(unittest.TestCase):
-    """Verify that portal requests use a direct opener to bypass system proxy."""
+    """Verify that legacy DIRECT_OPENER still exists for backward compatibility."""
 
     def test_direct_opener_exists(self):
         self.assertIsNotNone(DIRECT_OPENER)
@@ -103,39 +105,126 @@ class TestDirectOpener(unittest.TestCase):
     def test_open_direct_exists(self):
         self.assertTrue(callable(open_direct))
 
-    def test_direct_opener_has_handlers(self):
-        self.assertIsNotNone(DIRECT_OPENER.handlers)
-        self.assertTrue(len(DIRECT_OPENER.handlers) > 0)
 
-    @patch("campus_auto_login.open_direct")
-    def test_invoke_jsonp_uses_open_direct(self, mock_open):
+class TestFetchDirectText(unittest.TestCase):
+    """Verify fetch_direct_text uses http.client.HTTPConnection."""
+
+    @patch("campus_auto_login.http.client.HTTPConnection")
+    def test_uses_http_client(self, mock_conn_cls):
+        mock_conn = MagicMock()
         mock_resp = MagicMock()
         mock_resp.read.return_value = b'callback({"result":1});'
-        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_open.return_value = mock_resp
+        mock_resp.status = 200
+        mock_conn.getresponse.return_value = mock_resp
+        mock_conn_cls.return_value = mock_conn
 
+        result = fetch_direct_text(
+            "http://10.200.84.3/drcom/chkstatus?callback=test",
+            headers={"User-Agent": "test"},
+            timeout=5,
+        )
+        self.assertEqual(result, 'callback({"result":1});')
+        mock_conn_cls.assert_called_once_with("10.200.84.3", 80, timeout=5)
+        mock_conn.request.assert_called_once()
+        call_args = mock_conn.request.call_args
+        self.assertEqual(call_args[0][0], "GET")
+        self.assertIn("/drcom/chkstatus", call_args[0][1])
+        mock_conn.close.assert_called_once()
+
+    @patch("campus_auto_login.http.client.HTTPConnection")
+    def test_path_and_query_preserved(self, mock_conn_cls):
+        mock_conn = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'ok'
+        mock_resp.status = 200
+        mock_conn.getresponse.return_value = mock_resp
+        mock_conn_cls.return_value = mock_conn
+
+        fetch_direct_text("http://10.200.84.3:801/eportal/portal/login?a=1&b=2")
+        call_args = mock_conn.request.call_args
+        path_used = call_args[0][1]
+        self.assertIn("/eportal/portal/login", path_used)
+        self.assertIn("a=1", path_used)
+        self.assertIn("b=2", path_used)
+
+    @patch("campus_auto_login.http.client.HTTPConnection")
+    def test_custom_port(self, mock_conn_cls):
+        mock_conn = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'ok'
+        mock_resp.status = 200
+        mock_conn.getresponse.return_value = mock_resp
+        mock_conn_cls.return_value = mock_conn
+
+        fetch_direct_text("http://10.200.84.3:801/test")
+        mock_conn_cls.assert_called_once_with("10.200.84.3", 801, timeout=10)
+
+    @patch("campus_auto_login.http.client.HTTPConnection")
+    def test_http_error_raises(self, mock_conn_cls):
+        mock_conn = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'error'
+        mock_resp.status = 404
+        mock_resp.reason = "Not Found"
+        mock_conn.getresponse.return_value = mock_resp
+        mock_conn_cls.return_value = mock_conn
+
+        with self.assertRaises(OSError) as ctx:
+            fetch_direct_text("http://10.200.84.3/notfound")
+        self.assertIn("404", str(ctx.exception))
+
+
+class TestInvokeJsonpUsesFetchDirect(unittest.TestCase):
+    @patch("campus_auto_login.fetch_direct_text")
+    def test_invoke_jsonp_calls_fetch_direct(self, mock_fetch):
+        mock_fetch.return_value = 'callback({"result":1});'
         result = invoke_jsonp("http://10.200.84.3", "/drcom/chkstatus")
         self.assertEqual(result["result"], 1)
-        mock_open.assert_called_once()
-        args = mock_open.call_args
-        self.assertIn("10.200.84.3", args[0][0].full_url)
+        mock_fetch.assert_called_once()
+        url = mock_fetch.call_args[0][0]
+        self.assertIn("10.200.84.3", url)
+        self.assertIn("/drcom/chkstatus", url)
 
-    @patch("campus_auto_login.open_direct")
-    def test_invoke_url_jsonp_uses_open_direct(self, mock_open):
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = b'callback({"result":"ok"});'
-        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_open.return_value = mock_resp
-
+    @patch("campus_auto_login.fetch_direct_text")
+    def test_invoke_url_jsonp_calls_fetch_direct(self, mock_fetch):
+        mock_fetch.return_value = 'callback({"result":"ok"});'
         result = invoke_url_jsonp(
             "http://10.200.84.3:801/eportal/portal/login",
             [("user_account", "test")],
             portal_base="http://10.200.84.3",
         )
         self.assertEqual(result["result"], "ok")
-        mock_open.assert_called_once()
+        mock_fetch.assert_called_once()
+
+    @patch("campus_auto_login.fetch_direct_text")
+    def test_invoke_url_jsonp_referer_uses_portal_base(self, mock_fetch):
+        mock_fetch.return_value = 'callback({"result":"ok"});'
+        invoke_url_jsonp(
+            "http://10.200.84.3:801/eportal/portal/login",
+            [],
+            portal_base="http://10.200.100.1",
+        )
+        headers = mock_fetch.call_args[1]["headers"]
+        self.assertEqual(headers["Referer"], "http://10.200.100.1/")
+
+
+class TestDiagnosePortalConnectivity(unittest.TestCase):
+    def test_returns_lines(self):
+        with patch("campus_auto_login.socket.create_connection") as mock_sock, \
+             patch("campus_auto_login._check_system_proxy_enabled", return_value=False), \
+             patch("campus_auto_login._check_proxy_env", return_value=False):
+            mock_sock.return_value = MagicMock()
+            lines = diagnose_portal_connectivity("http://10.200.84.3")
+            self.assertTrue(len(lines) > 5)
+            self.assertTrue(any("Portal host" in l for l in lines))
+            self.assertTrue(any("Socket" in l for l in lines))
+
+    def test_socket_fail_shown(self):
+        with patch("campus_auto_login.socket.create_connection", side_effect=OSError("test error")), \
+             patch("campus_auto_login._check_system_proxy_enabled", return_value=False), \
+             patch("campus_auto_login._check_proxy_env", return_value=False):
+            lines = diagnose_portal_connectivity("http://10.200.84.3")
+            self.assertTrue(any("FAIL" in l for l in lines))
 
 
 if __name__ == "__main__":

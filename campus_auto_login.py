@@ -3,10 +3,13 @@ import argparse
 import base64
 import ctypes
 import getpass
+import http.client
 import json
+import os
 import queue
 import random
 import re
+import socket
 import sys
 import threading
 import time
@@ -19,16 +22,39 @@ from urllib.error import HTTPError, URLError
 
 DEFAULT_PORTAL = "http://10.200.84.3"
 APP_NAME = "YAU-AutoNet-Connect"
-APP_VERSION = "1.0.2"
+APP_VERSION = "1.0.3"
 __version__ = APP_VERSION
 
-# Bypass system proxy for campus portal requests (avoids Clash system-proxy issues)
+# Legacy urllib opener kept for backward compatibility; v1.0.3 core path uses http.client direct.
 DIRECT_OPENER = request.build_opener(request.ProxyHandler({}))
 
 
 def open_direct(req, timeout=10):
-    """Open a request using DIRECT_OPENER to bypass system proxy."""
+    """Legacy fallback: open a request using DIRECT_OPENER to bypass system proxy."""
     return DIRECT_OPENER.open(req, timeout=timeout)
+
+
+def fetch_direct_text(url, headers=None, timeout=10):
+    """Fetch URL content using raw http.client.HTTPConnection (bypasses urllib proxy entirely)."""
+    parsed = parse.urlsplit(url)
+    if parsed.scheme and parsed.scheme != "http":
+        raise ValueError("fetch_direct_text only supports http:// URLs, got: {0}".format(parsed.scheme))
+    host = parsed.hostname
+    port = parsed.port or 80
+    path_with_query = parsed.path or "/"
+    if parsed.query:
+        path_with_query = "{0}?{1}".format(path_with_query, parsed.query)
+    conn = http.client.HTTPConnection(host, port, timeout=timeout)
+    try:
+        conn.request("GET", path_with_query, headers=headers or {})
+        resp = conn.getresponse()
+        body = resp.read()
+        status = resp.status
+        if status >= 400:
+            raise OSError("HTTP {0} {1} from {2}".format(status, resp.reason, url))
+        return body.decode("utf-8", errors="replace")
+    finally:
+        conn.close()
 
 
 def app_base_dir():
@@ -197,15 +223,11 @@ def invoke_jsonp(portal_base, path, params=None, timeout=10, force_trailing_lang
     if force_trailing_lang or "lang" not in keys:
         all_params.append(("lang", "zh"))
     url = "{0}{1}?{2}".format(portal_base.rstrip("/"), path, query_string(all_params))
-    req = request.Request(
-        url,
-        headers={
-            "User-Agent": "Mozilla/5.0 Windows NT 10.0 Win64 x64 campus-auto-login-python",
-            "Accept": "*/*",
-        },
-    )
-    with open_direct(req, timeout=timeout) as resp:
-        content = resp.read().decode("utf-8", errors="replace")
+    headers = {
+        "User-Agent": "Mozilla/5.0 Windows NT 10.0 Win64 x64 campus-auto-login-python",
+        "Accept": "*/*",
+    }
+    content = fetch_direct_text(url, headers=headers, timeout=timeout)
     return jsonp_to_obj(content)
 
 
@@ -222,16 +244,12 @@ def invoke_url_jsonp(url_base, params=None, timeout=10, force_trailing_lang=Fals
         all_params.append(("lang", "zh"))
     url = "{0}?{1}".format(url_base, query_string(all_params))
     referer = (portal_base or DEFAULT_PORTAL).rstrip("/") + "/"
-    req = request.Request(
-        url,
-        headers={
-            "User-Agent": "Mozilla/5.0 Windows NT 10.0 Win64 x64 campus-auto-login-python",
-            "Accept": "*/*",
-            "Referer": referer,
-        },
-    )
-    with open_direct(req, timeout=timeout) as resp:
-        content = resp.read().decode("utf-8", errors="replace")
+    headers = {
+        "User-Agent": "Mozilla/5.0 Windows NT 10.0 Win64 x64 campus-auto-login-python",
+        "Accept": "*/*",
+        "Referer": referer,
+    }
+    content = fetch_direct_text(url, headers=headers, timeout=timeout)
     return jsonp_to_obj(content)
 
 
@@ -321,13 +339,27 @@ def get_status(portal_base):
             "online": False,
             "raw": None,
             "error": str(exc),
+            "is_network_unreachable": "[WinError 10065]" in str(exc)
+            or "Network is unreachable" in str(exc),
         }
 
 
 def login_once(config, args):
     status = get_status(config["portal_base"])
     if not status["reachable"]:
-        write_log(args.log, "Portal unreachable:{0}".format(status["error"]))
+        write_log(args.log, "Portal unreachable via raw direct HTTP: {0}".format(status["error"]))
+        if status.get("is_network_unreachable"):
+            write_log(
+                args.log,
+                "This means the campus portal host is not reachable from the current network route.",
+            )
+            if _check_system_proxy_enabled():
+                write_log(
+                    args.log,
+                    "System proxy is enabled, but raw direct socket also failed; "
+                    "this is likely a route/network reachability issue, not only urllib proxy.",
+                )
+        maybe_diagnose(config["portal_base"], args.log)
         return False
     if status["online"]:
         write_log(args.log, "Already online.No login needed.")
@@ -420,6 +452,7 @@ def parse_args():
     parser.add_argument("--log", type=Path, default=DEFAULT_LOG, help="Log path.")
     parser.add_argument("--terminal-type", type=int, default=1, help="1 for PC,2 for mobile.")
     parser.add_argument("--tray", action="store_true", help="Run in system tray background mode.")
+    parser.add_argument("--diagnose", action="store_true", help="Run portal connectivity diagnostic and exit.")
     return parser.parse_args()
 
 
@@ -429,6 +462,102 @@ def normalize_interval(seconds):
     if seconds > MAX_INTERVAL_SECONDS:
         return MAX_INTERVAL_SECONDS
     return seconds
+
+
+# ---------------------------------------------------------------------------
+# Diagnostic helpers
+# ---------------------------------------------------------------------------
+
+_last_diagnose_time = 0
+_DIAGNOSE_COOLDOWN = 600  # 10 minutes between detailed diagnostics
+
+
+def _check_system_proxy_enabled():
+    """Read Windows system proxy registry (read-only, no modification)."""
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+            0,
+            winreg.KEY_READ,
+        ) as key:
+            enabled, _ = winreg.QueryValueEx(key, "ProxyEnable")
+            return bool(enabled)
+    except (OSError, ValueError):
+        return False
+
+
+def _check_proxy_env():
+    """Check if proxy environment variables are set."""
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+        if os.environ.get(name):
+            return True
+    return False
+
+
+def diagnose_portal_connectivity(portal_base, timeout=3, log_fn=None):
+    """Diagnose connectivity to the campus portal. Returns a list of diagnostic lines."""
+    import os
+    lines = []
+    parsed = parse.urlsplit(portal_base.rstrip("/"))
+    host = parsed.hostname or "10.200.84.3"
+    port = parsed.port or 80
+    scheme = parsed.scheme or "http"
+
+    lines.append("--- Portal Connectivity Diagnostic ---")
+    lines.append("Portal host: {0}".format(host))
+    lines.append("Portal base: {0}".format(portal_base.rstrip("/")))
+    lines.append("Status URL: {0}/drcom/chkstatus".format(portal_base.rstrip("/")))
+    lines.append("Login URL: {0}://{1}:801/eportal/portal/login".format(scheme, host))
+
+    # Socket test port 80
+    try:
+        sock = socket.create_connection((host, port), timeout=timeout)
+        sock.close()
+        lines.append("Socket {0}:{1}: SUCCESS".format(host, port))
+    except OSError as exc:
+        lines.append("Socket {0}:{1}: FAIL - {2}".format(host, port, exc))
+
+    # Socket test port 801 (login endpoint)
+    try:
+        sock = socket.create_connection((host, 801), timeout=timeout)
+        sock.close()
+        lines.append("Socket {0}:801: SUCCESS".format(host))
+    except OSError as exc:
+        lines.append("Socket {0}:801: FAIL - {1}".format(host, exc))
+
+    # Proxy environment
+    proxy_env = _check_proxy_env()
+    lines.append("Proxy env vars detected: {0}".format("YES" if proxy_env else "NO"))
+
+    # Windows system proxy
+    sys_proxy = _check_system_proxy_enabled()
+    lines.append("Windows system proxy enabled: {0}".format("YES" if sys_proxy else "NO"))
+
+    # Route check (best-effort)
+    try:
+        result = os.popen("route print {0}".format(host)).read(512)
+        has_route = "0.0.0.0" not in result.split("\n")[3] if len(result.split("\n")) > 3 else False
+        lines.append("Route to {0}: {1}".format(host, "found" if has_route else "default gateway only (may not have direct route)".format(host)))
+    except Exception:
+        lines.append("Route check: unavailable")
+
+    lines.append("--- End Diagnostic ---")
+
+    if log_fn:
+        for line in lines:
+            log_fn(line)
+    return lines
+
+
+def maybe_diagnose(portal_base, log_path):
+    """Output diagnostic if portal unreachable, throttled to once per 10 minutes."""
+    global _last_diagnose_time
+    now = time.time()
+    if now - _last_diagnose_time < _DIAGNOSE_COOLDOWN:
+        return
+    _last_diagnose_time = now
+    diagnose_portal_connectivity(portal_base, log_fn=lambda msg: write_log(log_path, msg))
 
 
 # ---------------------------------------------------------------------------
@@ -607,7 +736,7 @@ def run_tray_mode(args):
         if args.portal_base != DEFAULT_PORTAL:
             config["portal_base"] = args.portal_base.rstrip("/")
         write_log(args.log, "校园网自动登录已在后台启动，监控间隔={0}s.".format(args.interval))
-        write_log(args.log, "Portal requests use direct opener to bypass system proxy.")
+        write_log(args.log, "Portal requests use raw http.client direct transport to bypass system proxy.")
         while True:
             try:
                 login_once(config, args)
@@ -647,6 +776,12 @@ def main():
             return 0
     if args.check:
         return check_only(args)
+
+    if args.diagnose:
+        lines = diagnose_portal_connectivity(args.portal_base)
+        for line in lines:
+            write_log(args.log, line)
+        return 0
 
     if args.once:
         config = read_config(args.config)
