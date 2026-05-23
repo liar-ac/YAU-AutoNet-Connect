@@ -110,6 +110,242 @@ def fetch_text_with_retry(url, headers=None, timeout=10, retries=None):
     raise last_exc
 
 
+# ---------------------------------------------------------------------------
+# Resilient portal transport: 4-layer fallback stack
+# ---------------------------------------------------------------------------
+
+_VIRTUAL_KEYWORDS_NET = [
+    "vmware", "virtualbox", "hyper-v", "virtual", "secitap", "sectap",
+    "netease", "uu", "tun", "tap", "wintun", "wireguard", "vpn",
+    "clash", "meta", "mihomo", "sstap", "loopback", "teredo",
+    "isatap", "6to4",
+]
+
+_preferred_source_ip = [None]  # cached after first successful interface-bound connection
+
+
+def _get_physical_adapter_ips():
+    """Get IPv4 addresses from physical network adapters, excluding virtual ones.
+    Returns list of (ip_address, ifIndex, alias, description) tuples."""
+    results = []
+    try:
+        out = os.popen(
+            'powershell.exe -NoProfile -Command "'
+            'Get-NetAdapter | Where-Object {$_.Status -eq \'Up\'} | ForEach-Object { '
+            '$ip = Get-NetIPAddress -InterfaceIndex $_.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue | '
+            'Where-Object {$_.IPAddress -ne \'127.0.0.1\' -and $_.IPAddress -notlike \'169.254.*\'} | Select-Object -First 1; '
+            'if ($ip) { \'{0}|{1}|{2}|{3}\' -f $ip.IPAddress, $_.ifIndex, $_.Name, $_.InterfaceDescription }'
+            '}"'
+        ).read(4096).strip()
+        for line in out.splitlines():
+            if "|" not in line:
+                continue
+            parts = line.split("|", 3)
+            if len(parts) < 4:
+                continue
+            ip, ifidx, name, desc = parts[0].strip(), parts[1].strip(), parts[2].strip(), parts[3].strip()
+            combined = (name + " " + desc).lower()
+            is_virtual = any(kw in combined for kw in _VIRTUAL_KEYWORDS_NET)
+            results.append((ip, ifidx, name, desc, is_virtual))
+    except Exception:
+        pass
+    return results
+
+
+def _find_preferred_source_ip(portal_host="10.200.84.3", portal_port=80, timeout=3):
+    """Find the best local IP to bind for reaching the portal.
+    Tests each physical adapter's IP with source_address binding.
+    Returns (ip, ifidx, alias) or None."""
+    if _preferred_source_ip[0]:
+        return _preferred_source_ip[0]
+
+    adapters = _get_physical_adapter_ips()
+    # Separate physical and virtual
+    physical = [(ip, ifidx, name, desc) for ip, ifidx, name, desc, virt in adapters if not virt]
+    virtual = [(ip, ifidx, name, desc) for ip, ifidx, name, desc, virt in adapters if virt]
+
+    # Try physical first, then virtual as fallback
+    for candidates in [physical, virtual]:
+        for ip, ifidx, name, desc in candidates:
+            try:
+                s = socket.create_connection((portal_host, portal_port), timeout=timeout, source_address=(ip, 0))
+                s.close()
+                _preferred_source_ip[0] = (ip, ifidx, name)
+                return _preferred_source_ip[0]
+            except OSError:
+                continue
+    return None
+
+
+def fetch_direct_with_source(url, source_ip, headers=None, timeout=10):
+    """Like fetch_direct_text but binds to a specific local IP."""
+    parsed = parse.urlsplit(url)
+    host = parsed.hostname
+    port = parsed.port or 80
+    path_with_query = parsed.path or "/"
+    if parsed.query:
+        path_with_query = "{0}?{1}".format(path_with_query, parsed.query)
+    conn = http.client.HTTPConnection(host, port, timeout=timeout, source_address=(source_ip, 0))
+    try:
+        conn.request("GET", path_with_query, headers=headers or {})
+        resp = conn.getresponse()
+        body = resp.read()
+        if resp.status >= 400:
+            raise OSError("HTTP {0} {1} from {2}".format(resp.status, resp.reason, url))
+        return body.decode("utf-8", errors="replace")
+    finally:
+        conn.close()
+
+
+def _powershell_no_proxy_fetch(url, timeout=10):
+    """Fetch URL using PowerShell's .NET WebClient with proxy explicitly bypassed."""
+    try:
+        # Use .NET WebClient with UseDefaultCredentials=false and no proxy
+        ps_cmd = (
+            '[System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12; '
+            '$wc = New-Object System.Net.WebClient; '
+            '$wc.Proxy = [System.Net.GlobalProxySelection]::GetEmptyWebProxy; '
+            '$wc.Headers.Add(\"User-Agent\", \"campus-auto-login\"); '
+            '$wc.DownloadString(\"{0}\")'
+        ).format(url.replace('"', '`"'))
+        result = os.popen(
+            'powershell.exe -NoProfile -Command "{0}"'.format(ps_cmd)
+        ).read(8192).strip()
+        if result and len(result) > 5:
+            return result
+    except Exception:
+        pass
+    return None
+
+
+def _get_system_proxy_settings():
+    """Read current Windows system proxy settings for safe restore."""
+    settings = {"ProxyEnable": 0, "ProxyServer": "", "ProxyOverride": ""}
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+            0, winreg.KEY_READ,
+        ) as key:
+            try:
+                settings["ProxyEnable"], _ = winreg.QueryValueEx(key, "ProxyEnable")
+            except (OSError, ValueError):
+                pass
+            try:
+                settings["ProxyServer"], _ = winreg.QueryValueEx(key, "ProxyServer")
+            except (OSError, ValueError):
+                pass
+            try:
+                settings["ProxyOverride"], _ = winreg.QueryValueEx(key, "ProxyOverride")
+            except (OSError, ValueError):
+                pass
+    except (OSError, ValueError):
+        pass
+    return settings
+
+
+def _set_system_proxy(enable, server="", override=""):
+    """Set Windows system proxy and notify the system of the change."""
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+            0, winreg.KEY_SET_VALUE,
+        ) as key:
+            winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 1 if enable else 0)
+            if server:
+                winreg.SetValueEx(key, "ProxyServer", 0, winreg.REG_SZ, server)
+            if override:
+                winreg.SetValueEx(key, "ProxyOverride", 0, winreg.REG_SZ, override)
+        # Notify system of proxy change
+        try:
+            import ctypes as _ct
+            INTERNET_OPTION_SETTINGS_CHANGED = 39
+            INTERNET_OPTION_REFRESH = 37
+            _ct.windll.wininet.InternetSetOptionW(0, INTERNET_OPTION_SETTINGS_CHANGED, 0, 0)
+            _ct.windll.wininet.InternetSetOptionW(0, INTERNET_OPTION_REFRESH, 0, 0)
+        except Exception:
+            pass
+        return True
+    except Exception:
+        return False
+
+
+def _temporary_proxy_bypass_fetch(url, headers=None, timeout=10):
+    """Temporarily disable system proxy, fetch, then restore. Returns text or None."""
+    original = _get_system_proxy_settings()
+    try:
+        # Temporarily disable system proxy
+        _set_system_proxy(False)
+        time.sleep(0.3)  # brief pause for system to apply
+        # Try direct fetch
+        text = fetch_direct_text(url, headers=headers, timeout=timeout)
+        return text
+    except Exception:
+        return None
+    finally:
+        # Always restore original proxy settings
+        _set_system_proxy(
+            enable=original["ProxyEnable"],
+            server=original["ProxyServer"],
+            override=original["ProxyOverride"],
+        )
+
+
+def fetch_portal_text_resilient(url, headers=None, timeout=10, purpose="status",
+                                 allow_proxy_bypass=False):
+    """Resilient 4-layer fetch for campus portal URLs.
+    Layer 1: raw http.client direct
+    Layer 2: interface-bound raw direct (bind to physical adapter IP)
+    Layer 3: PowerShell .NET WebClient with no proxy
+    Layer 4: temporary Windows proxy bypass (if allowed)
+
+    Returns (text, layer_name) on success, raises OSError if all layers fail.
+    """
+    if headers is None:
+        headers = {"User-Agent": "Mozilla/5.0 Windows NT 10.0 Win64 x64 campus-auto-login-python", "Accept": "*/*"}
+
+    errors = []
+
+    # Layer 1: raw http.client direct
+    try:
+        text = fetch_direct_text(url, headers=headers, timeout=timeout)
+        return text, "raw_direct"
+    except (OSError, ValueError) as e:
+        errors.append("raw_direct: {0}".format(e))
+
+    # Layer 2: interface-bound raw direct
+    parsed = parse.urlsplit(url)
+    portal_host = parsed.hostname or "10.200.84.3"
+    portal_port = parsed.port or 80
+    src = _find_preferred_source_ip(portal_host, portal_port, timeout=min(timeout, 5))
+    if src:
+        try:
+            text = fetch_direct_with_source(url, src[0], headers=headers, timeout=timeout)
+            return text, "interface_bound({0})".format(src[0])
+        except (OSError, ValueError) as e:
+            errors.append("interface_bound({0}): {1}".format(src[0], e))
+    else:
+        errors.append("interface_bound: no local interface can reach portal")
+
+    # Layer 3: PowerShell .NET WebClient no-proxy
+    ps_result = _powershell_no_proxy_fetch(url, timeout=min(timeout, 15))
+    if ps_result:
+        return ps_result, "powershell_no_proxy"
+    errors.append("powershell_no_proxy: failed")
+
+    # Layer 4: temporary proxy bypass (only if allowed)
+    if allow_proxy_bypass:
+        text = _temporary_proxy_bypass_fetch(url, headers=headers, timeout=timeout)
+        if text:
+            return text, "temp_proxy_bypass"
+        errors.append("temp_proxy_bypass: failed")
+    else:
+        errors.append("temp_proxy_bypass: not enabled (use --allow-temporary-proxy-bypass)")
+
+    raise OSError("All transport layers failed for {0}: {1}".format(url, "; ".join(errors)))
+
+
 def ensure_process_proxy_bypass_for_portal(portal_hosts=None):
     """Add portal hosts to NO_PROXY env var for this process only.
     Does NOT modify Windows system proxy or registry."""
@@ -278,7 +514,8 @@ def query_string(pairs):
     return parse.urlencode([(str(k), str(v)) for k, v in pairs], doseq=False)
 
 
-def invoke_jsonp(portal_base, path, params=None, timeout=10, force_trailing_lang=False):
+def invoke_jsonp(portal_base, path, params=None, timeout=10, force_trailing_lang=False,
+                  allow_proxy_bypass=False):
     params = list(params or [])
     keys = {k for k, _ in params}
     callback = "dr{0}".format(random.randint(100000, 999999))
@@ -294,11 +531,15 @@ def invoke_jsonp(portal_base, path, params=None, timeout=10, force_trailing_lang
         "User-Agent": "Mozilla/5.0 Windows NT 10.0 Win64 x64 campus-auto-login-python",
         "Accept": "*/*",
     }
-    content = fetch_direct_text(url, headers=headers, timeout=timeout)
+    content, _layer = fetch_portal_text_resilient(
+        url, headers=headers, timeout=timeout,
+        purpose="jsonp", allow_proxy_bypass=allow_proxy_bypass,
+    )
     return jsonp_to_obj(content)
 
 
-def invoke_url_jsonp(url_base, params=None, timeout=10, force_trailing_lang=False, portal_base=None):
+def invoke_url_jsonp(url_base, params=None, timeout=10, force_trailing_lang=False,
+                      portal_base=None, allow_proxy_bypass=False):
     params = list(params or [])
     keys = {k for k, _ in params}
     callback = "dr{0}".format(random.randint(100000, 999999))
@@ -316,7 +557,10 @@ def invoke_url_jsonp(url_base, params=None, timeout=10, force_trailing_lang=Fals
         "Accept": "*/*",
         "Referer": referer,
     }
-    content = fetch_direct_text(url, headers=headers, timeout=timeout)
+    content, _layer = fetch_portal_text_resilient(
+        url, headers=headers, timeout=timeout,
+        purpose="login", allow_proxy_bypass=allow_proxy_bypass,
+    )
     return jsonp_to_obj(content)
 
 
@@ -391,22 +635,22 @@ def init_config(args):
     write_log(args.log, "Config created:{0}".format(args.config))
 
 
-def get_status(portal_base):
-    """Check portal status. Returns a dict with 'state' field:
-    - "online": portal reachable and user is logged in
-    - "offline": portal reachable but user not logged in
-    - "portal_unreachable": portal HTTP error (not socket-level)
-    - "network_not_ready": socket-level failure (transient, may recover)
+def get_status(portal_base, allow_proxy_bypass=False):
+    """Check portal status using resilient transport.
+    Returns dict with 'state': online/offline/network_not_ready/portal_unreachable.
     """
+    url = "{0}/drcom/chkstatus?callback=_ck&jsVersion=4.X&v={1}&lang=zh".format(
+        portal_base.rstrip("/"), random.randint(500, 10500)
+    )
+    headers = {
+        "User-Agent": "Mozilla/5.0 Windows NT 10.0 Win64 x64 campus-auto-login-python",
+        "Accept": "*/*",
+    }
     try:
-        url = "{0}/drcom/chkstatus?callback=_ck&jsVersion=4.X&v={1}&lang=zh".format(
-            portal_base.rstrip("/"), random.randint(500, 10500)
+        content, layer = fetch_portal_text_resilient(
+            url, headers=headers, timeout=8,
+            purpose="status", allow_proxy_bypass=allow_proxy_bypass,
         )
-        headers = {
-            "User-Agent": "Mozilla/5.0 Windows NT 10.0 Win64 x64 campus-auto-login-python",
-            "Accept": "*/*",
-        }
-        content, attempts = fetch_text_with_retry(url, headers=headers, timeout=8)
         data = jsonp_to_obj(content)
         result_val = int(data.get("result", 0))
         return {
@@ -415,9 +659,9 @@ def get_status(portal_base):
             "online": result_val == 1,
             "raw": data,
             "error": None,
-            "attempts": attempts,
+            "layer": layer,
         }
-    except (HTTPError, URLError, TimeoutError, ValueError, OSError) as exc:
+    except (OSError, ValueError) as exc:
         is_socket = _is_socket_unreachable_error(exc)
         return {
             "state": "network_not_ready" if is_socket else "portal_unreachable",
@@ -426,6 +670,7 @@ def get_status(portal_base):
             "raw": None,
             "error": str(exc),
             "is_network_unreachable": is_socket,
+            "layer": None,
         }
 
 
@@ -433,7 +678,8 @@ def login_once(config, args, failure_state=None):
     """Attempt one login cycle. Returns True if online after this call.
     failure_state: dict to track consecutive failures across calls (for tray loop).
     """
-    status = get_status(config["portal_base"])
+    allow_bypass = getattr(args, "allow_temporary_proxy_bypass", False)
+    status = get_status(config["portal_base"], allow_proxy_bypass=allow_bypass)
 
     if status["state"] == "network_not_ready":
         # Socket-level failure - transient, likely Wi-Fi roaming or network transition
@@ -522,12 +768,13 @@ def login_once(config, args, failure_state=None):
                 timeout=12,
                 force_trailing_lang=True,
                 portal_base=config["portal_base"],
+                allow_proxy_bypass=allow_bypass,
             )
             result_value = result.get("result")
             if result_value == 1 or str(result_value).lower() in {"1", "ok"}:
                 write_log(args.log, "Login API returned success.")
                 time.sleep(2)
-                after = get_status(config["portal_base"])
+                after = get_status(config["portal_base"], allow_proxy_bypass=allow_bypass)
                 if after["online"]:
                     write_log(args.log, "Status recheck confirmed online.")
                     return True
@@ -576,7 +823,53 @@ def parse_args():
     parser.add_argument("--terminal-type", type=int, default=1, help="1 for PC,2 for mobile.")
     parser.add_argument("--tray", action="store_true", help="Run in system tray background mode.")
     parser.add_argument("--diagnose", action="store_true", help="Run portal connectivity diagnostic and exit.")
+    parser.add_argument("--allow-temporary-proxy-bypass", action="store_true",
+                        help="Allow temporarily disabling Windows system proxy for portal access.")
+    parser.add_argument("--check-wifi", action="store_true", help="Check current WiFi SSID and exit.")
+    parser.add_argument("--set-campus-ssid", action="store_true", help="Save current WiFi SSID as campus SSID.")
+    parser.add_argument("--campus-ssid", default="", help="Campus WiFi SSID for auto-reconnect.")
     return parser.parse_args()
+
+
+# ---------------------------------------------------------------------------
+# WiFi SSID detection
+# ---------------------------------------------------------------------------
+
+def get_current_wifi_ssid():
+    """Get the current WiFi SSID (read-only, best-effort)."""
+    try:
+        out = os.popen('netsh wlan show interfaces').read(4096)
+        for line in out.splitlines():
+            if "SSID" in line and "BSSID" not in line:
+                parts = line.split(":", 1)
+                if len(parts) >= 2:
+                    ssid = parts[1].strip()
+                    if ssid:
+                        return ssid
+    except Exception:
+        pass
+    return ""
+
+
+def check_wifi_and_warn(campus_ssid, log_fn=None):
+    """Check if current WiFi matches campus SSID. Returns True if OK."""
+    current = get_current_wifi_ssid()
+    if not current:
+        if log_fn:
+            log_fn("Current Wi-Fi SSID: <not connected or not Wi-Fi>")
+        return True  # can't determine, don't block
+    if not campus_ssid:
+        if log_fn:
+            log_fn("Current Wi-Fi SSID: {0} (no campus SSID configured)".format(current))
+        return True
+    if current.lower() == campus_ssid.lower():
+        if log_fn:
+            log_fn("Wi-Fi SSID matches campus: {0}".format(current))
+        return True
+    if log_fn:
+        log_fn("WARNING: Current Wi-Fi SSID '{0}' != campus SSID '{1}'. Portal may be unreachable.".format(
+            current, campus_ssid))
+    return False
 
 
 def normalize_interval(seconds):
@@ -973,17 +1266,18 @@ def maybe_diagnose(portal_base, log_path):
     diagnose_portal_connectivity(portal_base, log_fn=lambda msg: write_log(log_path, msg))
 
 
-def wait_for_portal_ready(portal_base, timeout_seconds=60, interval=5, log_fn=None):
+def wait_for_portal_ready(portal_base, timeout_seconds=60, interval=5, log_fn=None,
+                           allow_proxy_bypass=False):
     """Wait for the portal to become reachable. Returns status dict when ready, or None on timeout."""
     deadline = time.time() + timeout_seconds
     attempt = 0
     while time.time() < deadline:
         attempt += 1
-        status = get_status(portal_base)
+        status = get_status(portal_base, allow_proxy_bypass=allow_proxy_bypass)
         if status["state"] in ("online", "offline"):
             if log_fn:
-                log_fn("Portal reachable after {0}s ({1} attempts).".format(
-                    int(attempt * interval), attempt))
+                log_fn("Portal reachable after {0}s ({1} attempts) via {2}.".format(
+                    int(attempt * interval), attempt, status.get("layer", "?")))
             return status
         if log_fn and attempt == 1:
             log_fn("Waiting for portal to become reachable (timeout={0}s)...".format(timeout_seconds))
@@ -1226,11 +1520,40 @@ def main():
     if args.check:
         return check_only(args)
 
+    if args.check_wifi:
+        ssid = get_current_wifi_ssid()
+        write_log(args.log, "Current Wi-Fi SSID: {0}".format(ssid or "<not connected>"))
+        if args.campus_ssid:
+            check_wifi_and_warn(args.campus_ssid, log_fn=lambda msg: write_log(args.log, msg))
+        return 0
+
+    if args.set_campus_ssid:
+        ssid = get_current_wifi_ssid()
+        if not ssid:
+            write_log(args.log, "ERROR: No Wi-Fi SSID detected. Connect to campus Wi-Fi first.")
+            return 1
+        write_log(args.log, "Current Wi-Fi SSID: {0}".format(ssid))
+        write_log(args.log, "To save this as campus SSID, run:")
+        write_log(args.log, '  campus_auto_login_cli.exe --init --campus-ssid "{0}"'.format(ssid))
+        write_log(args.log, "Or add to config manually: \"campus_ssid\": \"{0}\"".format(ssid))
+        return 0
+
     if args.diagnose:
         lines = diagnose_portal_connectivity(args.portal_base)
         for line in lines:
             write_log(args.log, line)
-        # Also run portal discovery
+        # Also test resilient fetch layers
+        write_log(args.log, "--- Resilient Transport Test ---")
+        test_url = "{0}/drcom/chkstatus?callback=_diag&jsVersion=4.X&v=1&lang=zh".format(args.portal_base.rstrip("/"))
+        try:
+            content, layer = fetch_portal_text_resilient(
+                test_url, timeout=5, purpose="diagnose",
+                allow_proxy_bypass=args.allow_temporary_proxy_bypass,
+            )
+            write_log(args.log, "Resilient fetch SUCCESS via layer: {0}".format(layer))
+        except OSError as exc:
+            write_log(args.log, "Resilient fetch FAILED: {0}".format(exc))
+        # Portal auto-discovery
         write_log(args.log, "--- Portal Auto-Discovery ---")
         discovered = discover_portal_base(
             args.portal_base, timeout=3,
@@ -1244,6 +1567,9 @@ def main():
         config = read_config(args.config)
         if args.portal_base != DEFAULT_PORTAL:
             config["portal_base"] = args.portal_base.rstrip("/")
+        campus_ssid = args.campus_ssid or config.get("campus_ssid", "")
+        if campus_ssid:
+            check_wifi_and_warn(campus_ssid, log_fn=lambda msg: write_log(args.log, msg))
         # Portal auto-discovery for --once mode
         discovered = discover_portal_base(
             config["portal_base"], timeout=3,
@@ -1256,6 +1582,7 @@ def main():
         status = wait_for_portal_ready(
             config["portal_base"], timeout_seconds=60, interval=5,
             log_fn=lambda msg: write_log(args.log, msg),
+            allow_proxy_bypass=args.allow_temporary_proxy_bypass,
         )
         if status is None:
             write_log(args.log, "Portal not reachable after 60s. Campus network may not be connected.")
@@ -1265,6 +1592,7 @@ def main():
             write_log(args.log, "Already online. No login needed.")
             return 0
         # Portal reachable and offline - attempt login
+        write_log(args.log, "Campus portal is reachable and account is offline. Trying login...")
         return 0 if login_once(config, args) else 1
 
     if not args.tray and not args.init and not args.once and not args.check:

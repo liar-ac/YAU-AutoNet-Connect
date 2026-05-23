@@ -2,36 +2,52 @@
 
 ## 核心修复
 
-- 校园网网关请求使用 `http.client.HTTPConnection` 原生直连传输，完全绕过 urllib 和系统代理。
-- 新增 portal 自动发现能力：当默认 `10.200.84.3` 不可达时，自动通过 NCSI 探测（`msftconnecttest.com`、`gstatic.com` 等）和网关子网扫描发现校园网认证入口。
-- 优化错误信息，Portal unreachable 时自动触发诊断和 portal 发现。
+校园网请求采用 **4层兜底传输栈**，确保 Clash 系统代理开启时仍能访问校园网认证网关：
 
-## 和 v1.0.3 相比的改进
+1. **Raw direct**：`http.client.HTTPConnection` 直接 TCP 连接，不经过 urllib/系统代理
+2. **Interface-bound**：绑定物理网卡 IP 的 `source_address`，强制从校园网接口出站
+3. **PowerShell no-proxy**：.NET `WebClient` + `GlobalProxySelection::GetEmptyWebProxy`
+4. **临时代理旁路**：临时关闭 Windows 系统代理，请求后立即恢复（需 `--allow-temporary-proxy-bypass`）
 
-- v1.0.3 使用 http.client 直连，但如果 portal 地址不可达则直接失败。
-- v1.0.4 在 portal 不可达时自动尝试发现可用的认证入口，减少用户手动配置的需求。
+## 和 v1.0.3 相比
+
+- v1.0.3 只用 http.client 直连，如果路由/网卡选择错误仍会失败
+- v1.0.4 自动枚举物理网卡并绑定 source_address，逐个尝试直到成功
+- v1.0.4 新增 PowerShell no-proxy 和临时代理旁路作为兜底
+- v1.0.4 修复了诊断中错误选择 VMware 虚拟网卡 IP 的问题
+- v1.0.4 不再依赖外网连通性判断校园网状态
 
 ## 使用方式
 
 ```powershell
-# 诊断校园网网关连通性（不登录，不修改配置）
-.\campus_auto_login.exe --diagnose
-
-# 单次检测/登录后退出（不启动托盘后台循环）
-.\campus_auto_login.exe --once
-
-# 手动指定 portal 地址
-.\campus_auto_login.exe --once --portal-base http://10.200.100.1
-
-# 正常使用（双击 exe 后台托盘运行）
+# 日常使用（双击静默托盘）
 .\campus_auto_login.exe
+
+# 诊断（CLI 版有实时输出）
+.\campus_auto_login_cli.exe --diagnose
+
+# 单次检测/登录
+.\campus_auto_login_cli.exe --once
+
+# 允许临时代理旁路
+.\campus_auto_login_cli.exe --once --allow-temporary-proxy-bypass
+
+# 检查 WiFi
+.\campus_auto_login_cli.exe --check-wifi
 ```
+
+## 产物
+
+| 文件 | 说明 |
+|---|---|
+| `campus_auto_login.exe` | 后台托盘版（console=False），双击静默运行 |
+| `campus_auto_login_cli.exe` | 命令行版（console=True），用于 --diagnose / --once |
 
 ## 升级方式
 
-- 直接替换旧版 `campus_auto_login.exe` 即可。
-- 已初始化过账号密码的用户无需重新 `--init`。
-- 如果配置文件丢失或换电脑，才需要重新 `--init`。
+- 替换旧版 exe 即可
+- 已初始化用户无需重新 `--init`
+- 配置文件丢失或换电脑才需重新 `--init`
 
 ## SHA256 校验
 
@@ -39,18 +55,7 @@
 
 ## 注意事项
 
-- 默认双击 exe 仍为后台托盘静默运行，不会弹出终端窗口。
-- 不开 TUN/虚拟网卡模式时，通常不需要关闭 Clash 即可正常使用。
-- 如果开启 TUN/虚拟网卡模式，仍需在 Clash 规则中添加 DIRECT 规则：
-
-```yaml
-rules:
-  - IP-CIDR,10.200.84.3/32,DIRECT,no-resolve
-  - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
-  - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve
-  - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve
-  - IP-CIDR,100.64.0.0/10,DIRECT,no-resolve
-  - DOMAIN-SUFFIX,edu.cn,DIRECT
-```
-
-- 如果自动发现的 portal 地址不正确，可使用 `--portal-base` 手动指定。
+- 不开 TUN/虚拟网卡时，通常不需要关闭 Clash 系统代理
+- 开启 TUN/虚拟网卡时仍需 Clash DIRECT 规则
+- 退出校园网认证后没有外网是正常的，程序只访问校园网内网网关
+- 如果使用 `--allow-temporary-proxy-bypass`，程序会临时关闭系统代理并在请求后恢复

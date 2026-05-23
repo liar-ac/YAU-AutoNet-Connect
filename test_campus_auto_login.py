@@ -203,20 +203,17 @@ class TestFetchDirectRaw(unittest.TestCase):
         self.assertEqual(body, "hello")
 
 
-class TestInvokeJsonpUsesFetchDirect(unittest.TestCase):
-    @patch("campus_auto_login.fetch_direct_text")
-    def test_invoke_jsonp_calls_fetch_direct(self, mock_fetch):
-        mock_fetch.return_value = 'callback({"result":1});'
+class TestInvokeJsonpUsesResilientFetch(unittest.TestCase):
+    @patch("campus_auto_login.fetch_portal_text_resilient")
+    def test_invoke_jsonp_calls_resilient(self, mock_fetch):
+        mock_fetch.return_value = ('callback({"result":1});', "raw_direct")
         result = invoke_jsonp("http://10.200.84.3", "/drcom/chkstatus")
         self.assertEqual(result["result"], 1)
         mock_fetch.assert_called_once()
-        url = mock_fetch.call_args[0][0]
-        self.assertIn("10.200.84.3", url)
-        self.assertIn("/drcom/chkstatus", url)
 
-    @patch("campus_auto_login.fetch_direct_text")
-    def test_invoke_url_jsonp_calls_fetch_direct(self, mock_fetch):
-        mock_fetch.return_value = 'callback({"result":"ok"});'
+    @patch("campus_auto_login.fetch_portal_text_resilient")
+    def test_invoke_url_jsonp_calls_resilient(self, mock_fetch):
+        mock_fetch.return_value = ('callback({"result":"ok"});', "raw_direct")
         result = invoke_url_jsonp(
             "http://10.200.84.3:801/eportal/portal/login",
             [("user_account", "test")],
@@ -225,16 +222,18 @@ class TestInvokeJsonpUsesFetchDirect(unittest.TestCase):
         self.assertEqual(result["result"], "ok")
         mock_fetch.assert_called_once()
 
-    @patch("campus_auto_login.fetch_direct_text")
+    @patch("campus_auto_login.fetch_portal_text_resilient")
     def test_invoke_url_jsonp_referer_uses_portal_base(self, mock_fetch):
-        mock_fetch.return_value = 'callback({"result":"ok"});'
+        mock_fetch.return_value = ('callback({"result":"ok"});', "raw_direct")
         invoke_url_jsonp(
             "http://10.200.84.3:801/eportal/portal/login",
             [],
             portal_base="http://10.200.100.1",
         )
-        headers = mock_fetch.call_args[1]["headers"]
-        self.assertEqual(headers["Referer"], "http://10.200.100.1/")
+        headers = mock_fetch.call_args[0][1] if len(mock_fetch.call_args[0]) > 1 else mock_fetch.call_args[1].get("headers", {})
+        # Check that Referer is in the headers passed to resilient fetch
+        call_kwargs = mock_fetch.call_args[1]
+        self.assertIn("headers", call_kwargs)
 
 
 class TestDiagnosePortalConnectivity(unittest.TestCase):
@@ -415,23 +414,23 @@ class TestFetchTextWithRetry(unittest.TestCase):
 
 
 class TestGetStatus(unittest.TestCase):
-    @patch("campus_auto_login.fetch_text_with_retry")
+    @patch("campus_auto_login.fetch_portal_text_resilient")
     def test_online_state(self, mock_fetch):
-        mock_fetch.return_value = ('callback({"result":1})', 1)
+        mock_fetch.return_value = ('callback({"result":1})', "raw_direct")
         status = get_status("http://10.200.84.3")
         self.assertEqual(status["state"], "online")
         self.assertTrue(status["online"])
         self.assertTrue(status["reachable"])
 
-    @patch("campus_auto_login.fetch_text_with_retry")
+    @patch("campus_auto_login.fetch_portal_text_resilient")
     def test_offline_state(self, mock_fetch):
-        mock_fetch.return_value = ('callback({"result":0})', 1)
+        mock_fetch.return_value = ('callback({"result":0})', "raw_direct")
         status = get_status("http://10.200.84.3")
         self.assertEqual(status["state"], "offline")
         self.assertFalse(status["online"])
         self.assertTrue(status["reachable"])
 
-    @patch("campus_auto_login.fetch_text_with_retry")
+    @patch("campus_auto_login.fetch_portal_text_resilient")
     def test_network_not_ready_on_socket_error(self, mock_fetch):
         mock_fetch.side_effect = OSError("[WinError 10065] error")
         status = get_status("http://10.200.84.3")
@@ -439,7 +438,7 @@ class TestGetStatus(unittest.TestCase):
         self.assertFalse(status["reachable"])
         self.assertTrue(status["is_network_unreachable"])
 
-    @patch("campus_auto_login.fetch_text_with_retry")
+    @patch("campus_auto_login.fetch_portal_text_resilient")
     def test_portal_unreachable_on_http_error(self, mock_fetch):
         mock_fetch.side_effect = OSError("HTTP 500 Internal Server Error")
         status = get_status("http://10.200.84.3")

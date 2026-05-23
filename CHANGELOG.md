@@ -4,16 +4,25 @@
 
 ### Bug修复
 - 修复Clash仅开启系统代理时，校园网认证网关可能仍不可达的问题。
-- 增强原生直连HTTP传输，避免校园网请求进入系统代理路径。
-- 修复或增强portal地址不可达时的处理逻辑。
+- 校园网请求采用4层兜底传输栈：raw direct → 网卡绑定 → PowerShell no-proxy → 临时代理旁路。
+- 修复诊断中网卡/路由识别错误（之前可能选中VMware虚拟网卡IP）。
+- 增强虚拟网卡检测（VMware、SecTap、Netease UU TAP、TUN/TAP等）。
+- 退出认证后没有外网时不影响portal直连判断。
 
 ### 新增
-- 新增portal自动发现能力：默认网关不可达时，通过NCSI探测和网关子网扫描自动发现校园网认证入口。
-- 新增--once单次检测/登录模式（不启动托盘，便于测试）。
-- 新增--diagnose诊断模式，输出portal连通性、系统代理状态、路由信息和自动发现结果。
+- 新增fetch_portal_text_resilient 4层兜底传输栈。
+- 新增网卡绑定直连（source_address绑定物理网卡IP绕过代理路由）。
+- 新增临时代理旁路（--allow-temporary-proxy-bypass），临时关闭系统代理后安全恢复。
+- 新增进程级NO_PROXY保护（ensure_process_proxy_bypass_for_portal）。
+- 新增portal自动发现（configured → DEFAULT_PORTAL → gateway subnet → NCSI）。
+- 新增--diagnose增强诊断（路由、虚拟网卡、Raw direct HTTP、NO_PROXY等）。
+- 新增--once单次检测/登录模式。
+- 新增--check-wifi检测当前WiFi SSID。
+- 新增--set-campus-ssid保存校园WiFi SSID。
+- 新增campus_auto_login_cli.exe（console=True）用于命令行诊断。
 
 ### 兼容性
-- 保持后台托盘静默运行体验不变。
+- 保持后台托盘静默运行体验不变（campus_auto_login.exe console=False）。
 - 保持开机自启、单实例保护、托盘菜单、日志窗口等原有框架不变。
 
 ## v1.0.3 (2026-05-23)
