@@ -23,7 +23,7 @@ from urllib.error import HTTPError, URLError
 
 DEFAULT_PORTAL = "http://10.200.84.3"
 APP_NAME = "YAU-AutoNet-Connect"
-APP_VERSION = "1.0.5"
+APP_VERSION = "1.0.6"
 __version__ = APP_VERSION
 
 # Legacy urllib opener kept for backward compatibility; v1.0.4 core path uses http.client direct.
@@ -122,7 +122,15 @@ _VIRTUAL_KEYWORDS_NET = [
     "isatap", "6to4",
 ]
 
+# IP ranges that must never be used as source address for portal connections
+_VIRTUAL_IP_PREFIXES = ("198.18.", "198.19.", "169.254.", "127.")
+
 _preferred_source_ip = [None]  # cached after first successful interface-bound connection
+
+
+def _is_virtual_ip(ip):
+    """Return True if the IP belongs to a virtual/TUN/proxy adapter range."""
+    return any(ip.startswith(pfx) for pfx in _VIRTUAL_IP_PREFIXES)
 
 
 def _get_physical_adapter_ips():
@@ -146,7 +154,7 @@ def _get_physical_adapter_ips():
                 continue
             ip, ifidx, name, desc = parts[0].strip(), parts[1].strip(), parts[2].strip(), parts[3].strip()
             combined = (name + " " + desc).lower()
-            is_virtual = any(kw in combined for kw in _VIRTUAL_KEYWORDS_NET)
+            is_virtual = any(kw in combined for kw in _VIRTUAL_KEYWORDS_NET) or _is_virtual_ip(ip)
             results.append((ip, ifidx, name, desc, is_virtual))
     except Exception:
         pass
@@ -156,25 +164,30 @@ def _get_physical_adapter_ips():
 def _find_preferred_source_ip(portal_host="10.200.84.3", portal_port=80, timeout=3):
     """Find the best local IP to bind for reaching the portal.
     Tests each physical adapter's IP with source_address binding.
+    Never selects virtual/TUN adapter IPs (198.18.x.x etc).
     Returns (ip, ifidx, alias) or None."""
+    # Validate cached value is not a virtual IP
     if _preferred_source_ip[0]:
-        return _preferred_source_ip[0]
+        cached_ip = _preferred_source_ip[0][0]
+        if not _is_virtual_ip(cached_ip):
+            return _preferred_source_ip[0]
+        # Cached IP is virtual (e.g. 198.18.x.x from TUN) - discard it
+        _preferred_source_ip[0] = None
 
     adapters = _get_physical_adapter_ips()
-    # Separate physical and virtual
+    # Only use physical adapters - never fall back to virtual
     physical = [(ip, ifidx, name, desc) for ip, ifidx, name, desc, virt in adapters if not virt]
-    virtual = [(ip, ifidx, name, desc) for ip, ifidx, name, desc, virt in adapters if virt]
 
-    # Try physical first, then virtual as fallback
-    for candidates in [physical, virtual]:
-        for ip, ifidx, name, desc in candidates:
-            try:
-                s = socket.create_connection((portal_host, portal_port), timeout=timeout, source_address=(ip, 0))
-                s.close()
-                _preferred_source_ip[0] = (ip, ifidx, name)
-                return _preferred_source_ip[0]
-            except OSError:
-                continue
+    for ip, ifidx, name, desc in physical:
+        if _is_virtual_ip(ip):
+            continue
+        try:
+            s = socket.create_connection((portal_host, portal_port), timeout=timeout, source_address=(ip, 0))
+            s.close()
+            _preferred_source_ip[0] = (ip, ifidx, name)
+            return _preferred_source_ip[0]
+        except OSError:
+            continue
     return None
 
 
@@ -477,7 +490,7 @@ def fetch_portal_text_resilient(url, headers=None, timeout=10, purpose="status",
     # Windows still has a campus route hint but adapter enumeration is stale.
     _load_campus_route_cache()
     cached_source_ip = _campus_route_cache.get("source_ip")
-    if cached_source_ip:
+    if cached_source_ip and not _is_virtual_ip(cached_source_ip):
         try:
             text = fetch_direct_with_source(url, cached_source_ip, headers=headers, timeout=timeout)
             _preferred_source_ip[0] = (
@@ -1432,6 +1445,144 @@ def normalize_interval(seconds):
 
 
 # ---------------------------------------------------------------------------
+# Boot grace period & network readiness gate
+# ---------------------------------------------------------------------------
+
+BOOT_GRACE_SECONDS = 90  # wait this long after system boot before probing
+_network_ready_logged = False
+
+
+def _get_system_boot_time():
+    """Return the Unix timestamp of the last Windows boot (best-effort)."""
+    try:
+        out = os.popen(
+            'powershell.exe -NoProfile -Command "'
+            '(Get-CimInstance Win32_OperatingSystem).LastBootUpTime | '
+            'ForEach-Object { [int]([DateTimeOffset]::new($_).ToUnixTimeSeconds()) }"'
+        ).read(256).strip()
+        for line in out.splitlines():
+            val = line.strip()
+            if val.isdigit():
+                return int(val)
+    except Exception:
+        pass
+    return 0
+
+
+def _seconds_since_boot():
+    """Return seconds elapsed since system boot, or 0 if unknown."""
+    boot_ts = _get_system_boot_time()
+    if boot_ts > 0:
+        return int(time.time()) - boot_ts
+    return 0
+
+
+def boot_grace_wait(log_fn=None):
+    """If system recently booted, wait until network stabilizes.
+    Returns True if we had to wait, False if no wait was needed."""
+    elapsed = _seconds_since_boot()
+    if elapsed <= 0 or elapsed >= BOOT_GRACE_SECONDS:
+        return False
+    remaining = BOOT_GRACE_SECONDS - elapsed
+    if log_fn:
+        log_fn("[BootGuard] System booted {0}s ago. Waiting {1}s for network stabilization...".format(
+            elapsed, remaining))
+    time.sleep(remaining)
+    if log_fn:
+        log_fn("[BootGuard] Boot grace period ended. Resuming.")
+    return True
+
+
+def network_ready(portal_host="10.200.84.3", portal_port=80, log_fn=None):
+    """Check if the network is ready for portal probing.
+    All conditions must be met:
+    A. At least one physical (non-virtual) adapter is UP with a private IPv4
+    B. Default route (0.0.0.0) exists
+    C. TCP connect to portal succeeds
+    Returns True/False and logs details on first call or state change.
+    """
+    global _network_ready_logged
+    ok = True
+    details = []
+
+    # A. Physical adapter with private IPv4 (must not be virtual/TUN IP)
+    adapters = _get_physical_adapter_ips()
+    physical = [(ip, ifidx, name, desc) for ip, ifidx, name, desc, virt in adapters if not virt]
+    has_private_ip = False
+    for ip, ifidx, name, desc in physical:
+        if _is_virtual_ip(ip):
+            continue
+        if (ip.startswith("10.") or ip.startswith("172.16.") or ip.startswith("172.17.") or
+                ip.startswith("172.18.") or ip.startswith("172.19.") or ip.startswith("172.2") or
+                ip.startswith("172.3") or ip.startswith("192.168.")):
+            has_private_ip = True
+            details.append("[NetworkReady] Physical adapter: {0} ({1}) IPv4={2}".format(name, desc, ip))
+            break
+    if not has_private_ip:
+        if physical:
+            details.append("[NetworkReady] Physical adapter found but no private IPv4 yet: {0}".format(
+                ", ".join("{0}={1}".format(n, ip) for ip, _, n, _ in physical)))
+        else:
+            details.append("[NetworkReady] No physical adapter UP yet")
+        ok = False
+
+    # B. Default route
+    gw = _get_default_gateway()
+    if not gw:
+        details.append("[NetworkReady] Default route not ready")
+        ok = False
+    else:
+        details.append("[NetworkReady] Default route: {0}".format(gw))
+
+    # C. TCP connect to portal
+    if ok:
+        try:
+            s = socket.create_connection((portal_host, portal_port), timeout=3)
+            s.close()
+            details.append("[NetworkReady] Portal TCP {0}:{1} reachable".format(portal_host, portal_port))
+        except OSError as exc:
+            details.append("[NetworkReady] Portal TCP {0}:{1} not reachable: {2}".format(
+                portal_host, portal_port, exc))
+            ok = False
+
+    # Log on first call or state change
+    if not _network_ready_logged or not ok:
+        if log_fn:
+            for d in details:
+                log_fn(d)
+        _network_ready_logged = ok
+
+    return ok
+
+
+def wait_for_network_ready(portal_host="10.200.84.3", portal_port=80,
+                           timeout_seconds=120, check_interval=3,
+                           stable_seconds=5, log_fn=None):
+    """Wait until network_ready() returns True for consecutive stable_seconds.
+    Returns True if stable, False if timeout."""
+    deadline = time.time() + timeout_seconds
+    consecutive_ok = 0
+    first_pass = True
+
+    while time.time() < deadline:
+        if network_ready(portal_host, portal_port, log_fn=log_fn if first_pass else None):
+            consecutive_ok += check_interval
+            if consecutive_ok >= stable_seconds:
+                if log_fn:
+                    log_fn("[NetworkReady] Network stable for {0}s. Ready to probe portal.".format(consecutive_ok))
+                return True
+        else:
+            consecutive_ok = 0
+        first_pass = False
+        remaining = deadline - time.time()
+        time.sleep(min(check_interval, max(1, remaining)))
+
+    if log_fn:
+        log_fn("[NetworkReady] Timeout after {0}s. Network not stable.".format(timeout_seconds))
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Portal auto-discovery
 # ---------------------------------------------------------------------------
 
@@ -1741,6 +1892,14 @@ def diagnose_portal_connectivity(portal_base, timeout=3, log_fn=None):
     lines.append("Portal base: {0}".format(portal_base.rstrip("/")))
     lines.append("Status URL: {0}/drcom/chkstatus".format(portal_base.rstrip("/")))
     lines.append("Login URL: {0}://{1}:801/eportal/portal/login".format(scheme, host))
+
+    # Boot time info
+    boot_elapsed = _seconds_since_boot()
+    if boot_elapsed > 0:
+        lines.append("System uptime: {0}s ({1}min)".format(boot_elapsed, boot_elapsed // 60))
+        if boot_elapsed < BOOT_GRACE_SECONDS:
+            lines.append("WARNING: Still within boot grace period ({0}s/{1}s)".format(
+                boot_elapsed, BOOT_GRACE_SECONDS))
 
     # Portal route info (the CORRECT interface for reaching the portal)
     route_info = _get_portal_route_info(host)
@@ -2089,6 +2248,12 @@ def run_tray_mode(args):
             config["portal_base"] = args.portal_base.rstrip("/")
         write_log(args.log, "校园网自动登录已在后台启动，监控间隔={0}s.".format(args.interval))
         write_log(args.log, "Portal requests use raw http.client direct transport to bypass system proxy.")
+        # Boot grace period: wait for network to stabilize after system startup
+        boot_grace_wait(log_fn=lambda msg: write_log(args.log, msg))
+        # Network ready gate: wait for physical adapter, route, and TCP before probing
+        portal_host = parse.urlsplit(config["portal_base"]).hostname or "10.200.84.3"
+        if not wait_for_network_ready(portal_host, log_fn=lambda msg: write_log(args.log, msg)):
+            write_log(args.log, "[BootGuard] Network not ready after grace period. Proceeding with normal retry loop.")
         # Portal auto-discovery at startup
         discovered = discover_portal_base(
             config["portal_base"], timeout=3,
@@ -2230,6 +2395,12 @@ def main():
         campus_ssid = args.campus_ssid or config.get("campus_ssid", "")
         if campus_ssid:
             check_wifi_and_warn(campus_ssid, log_fn=lambda msg: write_log(args.log, msg))
+        # Boot grace period
+        boot_grace_wait(log_fn=lambda msg: write_log(args.log, msg))
+        # Network ready gate
+        portal_host = parse.urlsplit(config["portal_base"]).hostname or "10.200.84.3"
+        if not wait_for_network_ready(portal_host, timeout_seconds=90, log_fn=lambda msg: write_log(args.log, msg)):
+            write_log(args.log, "[NetworkReady] Network not stable after 90s. Proceeding anyway.")
         # Portal auto-discovery for --once mode
         discovered = discover_portal_base(
             config["portal_base"], timeout=3,
