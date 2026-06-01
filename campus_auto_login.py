@@ -214,8 +214,6 @@ def fetch_direct_with_source(url, source_ip, headers=None, timeout=10):
 def _powershell_no_proxy_fetch(url, timeout=10):
     """Fetch URL using PowerShell's .NET WebClient with proxy explicitly bypassed.
     Uses a temp .ps1 file to avoid shell interpretation of URL characters like &."""
-    import subprocess
-    import base64 as _b64
     import tempfile
     # Build PowerShell script that outputs Base64-encoded response body
     escaped_url = url.replace("'", "''")
@@ -253,7 +251,7 @@ def _powershell_no_proxy_fetch(url, timeout=10):
             return None
         # Validate stdout is valid Base64
         try:
-            decoded = _b64.b64decode(stdout).decode("utf-8", errors="replace")
+            decoded = base64.b64decode(stdout).decode("utf-8", errors="replace")
         except Exception:
             return None
         if not decoded or len(decoded) < 5:
@@ -333,7 +331,6 @@ def _set_system_proxy(enable, server="", override=""):
 def _temporary_proxy_bypass_fetch(url, headers=None, timeout=10):
     """Temporarily disable system proxy, fetch, then restore. Returns text or None."""
     original = _get_system_proxy_settings()
-    proxy_was_restored = False
     try:
         # Temporarily disable system proxy
         _set_system_proxy(False)
@@ -345,13 +342,11 @@ def _temporary_proxy_bypass_fetch(url, headers=None, timeout=10):
         return None
     finally:
         # Always restore original proxy settings
-        success = _set_system_proxy(
+        _set_system_proxy(
             enable=original["ProxyEnable"],
             server=original["ProxyServer"],
             override=original["ProxyOverride"],
         )
-        if success:
-            proxy_was_restored = True
 
 
 # Cached campus network route info for route repair
@@ -1568,8 +1563,14 @@ def network_ready(portal_host="10.200.84.3", portal_port=80, log_fn=None):
         if _is_virtual_ip(ip):
             continue
         if (ip.startswith("10.") or ip.startswith("172.16.") or ip.startswith("172.17.") or
-                ip.startswith("172.18.") or ip.startswith("172.19.") or ip.startswith("172.2") or
-                ip.startswith("172.3") or ip.startswith("192.168.")):
+                ip.startswith("172.18.") or ip.startswith("172.19.") or
+                ip.startswith("172.20.") or ip.startswith("172.21.") or
+                ip.startswith("172.22.") or ip.startswith("172.23.") or
+                ip.startswith("172.24.") or ip.startswith("172.25.") or
+                ip.startswith("172.26.") or ip.startswith("172.27.") or
+                ip.startswith("172.28.") or ip.startswith("172.29.") or
+                ip.startswith("172.30.") or ip.startswith("172.31.") or
+                ip.startswith("192.168.")):
             has_private_ip = True
             details.append("[NetworkReady] Physical adapter: {0} ({1}) IPv4={2}".format(name, desc, ip))
             break
@@ -1860,11 +1861,12 @@ def _get_portal_route_info(portal_host):
     # Try to get interface alias via PowerShell (best-effort)
     if result["sourceIP"]:
         try:
+            src_ip = result["sourceIP"]
             ps_out = os.popen(
                 'powershell.exe -NoProfile -Command "'
-                'Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.IPAddress -eq \'' + result["sourceIP"] + '\'} | '
-                'Select-Object -First 1 | ForEach-Object { \'%s|%s|%s\' -f $_.InterfaceIndex, $_.InterfaceAlias, $_.IPAddress }"'
-                '"' % result["sourceIP"]
+                'Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.IPAddress -eq \'' + src_ip + '\'} | '
+                'Select-Object -First 1 | ForEach-Object { \'%s|%s|%s\' -f $_.InterfaceIndex, $_.InterfaceAlias, $_.IPAddress }'
+                '"'
             ).read(512).strip()
             if ps_out and "|" in ps_out:
                 parts = ps_out.split("|")
@@ -1900,13 +1902,6 @@ def _get_proxy_details():
         return "", ""
 
 
-_VIRTUAL_KEYWORDS = [
-    "clash", "meta", "mihomo", "tun", "tap", "wintun", "wireguard",
-    "vpn", "virtual", "vmware", "virtualbox", "hyper-v",
-    "netease", "uu", "sstap", "sectap", "secitap",
-]
-
-
 def _detect_virtual_adapters():
     """Detect virtual/TUN/TAP adapters via Get-NetAdapter (read-only).
     Returns list of (Name, InterfaceDescription, Status, ifIndex) tuples."""
@@ -1925,7 +1920,7 @@ def _detect_virtual_adapters():
                 continue
             name, desc, status, ifidx = parts[0].strip(), parts[1].strip(), parts[2].strip(), parts[3].strip()
             combined = (name + " " + desc).lower()
-            for kw in _VIRTUAL_KEYWORDS:
+            for kw in _VIRTUAL_KEYWORDS_NET:
                 if kw in combined:
                     found.append((name, desc, status, ifidx))
                     break
