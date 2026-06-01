@@ -806,11 +806,11 @@ def read_config(config_path):
     if not config_path.exists():
         if config_path == DEFAULT_CONFIG and DEFAULT_PS_CONFIG.exists():
             return read_powershell_config(DEFAULT_PS_CONFIG)
-        raise FileNotFoundError("Config not found.Run:first python campus_auto_login.py --init")
+        raise FileNotFoundError("Config not found. Run: campus_auto_login_cli.exe --init")
     with config_path.open("r", encoding="utf-8-sig") as f:
         data = json.load(f)
     if not data.get("username") or not data.get("password_dpapi"):
-        raise ValueError("Config misses username or password_dpapi.Run --init again.")
+        raise ValueError("Config misses username or password_dpapi. Run: campus_auto_login_cli.exe --init")
     data["config_format"] = "python"
     return data
 
