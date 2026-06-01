@@ -18,7 +18,6 @@ import winreg
 from ctypes import wintypes
 from pathlib import Path
 from urllib import parse, request
-from urllib.error import HTTPError, URLError
 
 
 DEFAULT_PORTAL = "http://10.200.84.3"

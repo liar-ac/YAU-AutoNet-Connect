@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Lightweight tests for campus_auto_login (no network required)."""
-import json
 import os
 import unittest
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import campus_auto_login as campus_module
 from campus_auto_login import (
