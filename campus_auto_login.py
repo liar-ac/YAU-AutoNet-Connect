@@ -88,6 +88,10 @@ def _is_socket_unreachable_error(exc):
         or "[Errno 110]" in msg  # ETIMEDOUT on Linux
         or "[Errno 101]" in msg  # ENETUNREACH
         or "[Errno 113]" in msg  # EHOSTUNREACH
+        or "Remote end closed connection without response" in msg
+        or "Connection reset by peer" in msg
+        or "[Errno 104]" in msg  # ECONNRESET
+        or "[Errno 10054]" in msg  # WSAECONNRESET on Windows
     )
 
 
@@ -1562,61 +1566,36 @@ def boot_grace_wait(log_fn=None):
 
 def network_ready(portal_host="10.200.84.3", portal_port=80, log_fn=None):
     """Check if the network is ready for portal probing.
-    All conditions must be met:
-    A. At least one physical (non-virtual) adapter is UP with a private IPv4
-    B. Default route (0.0.0.0) exists
-    C. TCP connect to portal succeeds
+    Primary check: TCP connect to portal succeeds = network is ready.
+    Secondary info: adapter status, gateway, etc. (logged but not blocking).
     Returns True/False and logs details on first call or state change.
     """
     global _network_ready_logged
-    ok = True
     details = []
 
-    # A. Physical adapter with private IPv4 (must not be virtual/TUN IP)
+    # Info: adapter status (non-blocking, for diagnostics only)
     adapters = _get_physical_adapter_ips()
     physical = [(ip, ifidx, name, desc) for ip, ifidx, name, desc, virt in adapters if not virt]
-    has_private_ip = False
-    for ip, ifidx, name, desc in physical:
-        if _is_virtual_ip(ip):
-            continue
-        if (ip.startswith("10.") or ip.startswith("172.16.") or ip.startswith("172.17.") or
-                ip.startswith("172.18.") or ip.startswith("172.19.") or
-                ip.startswith("172.20.") or ip.startswith("172.21.") or
-                ip.startswith("172.22.") or ip.startswith("172.23.") or
-                ip.startswith("172.24.") or ip.startswith("172.25.") or
-                ip.startswith("172.26.") or ip.startswith("172.27.") or
-                ip.startswith("172.28.") or ip.startswith("172.29.") or
-                ip.startswith("172.30.") or ip.startswith("172.31.") or
-                ip.startswith("192.168.")):
-            has_private_ip = True
-            details.append("[NetworkReady] Physical adapter: {0} ({1}) IPv4={2}".format(name, desc, ip))
-            break
-    if not has_private_ip:
-        if physical:
-            details.append("[NetworkReady] Physical adapter found but no private IPv4 yet: {0}".format(
-                ", ".join("{0}={1}".format(n, ip) for ip, _, n, _ in physical)))
-        else:
-            details.append("[NetworkReady] No physical adapter UP yet")
-        ok = False
-
-    # B. Default route
-    gw = _get_default_gateway()
-    if not gw:
-        details.append("[NetworkReady] Default route not ready")
-        ok = False
+    if physical:
+        for ip, ifidx, name, desc in physical[:2]:
+            details.append("[NetworkReady] Adapter: {0} ({1}) IPv4={2}".format(name, desc, ip))
     else:
-        details.append("[NetworkReady] Default route: {0}".format(gw))
+        details.append("[NetworkReady] No physical adapter detected (may be virtual/TUN environment)")
 
-    # C. TCP connect to portal
-    if ok:
-        try:
-            s = socket.create_connection((portal_host, portal_port), timeout=3)
-            s.close()
-            details.append("[NetworkReady] Portal TCP {0}:{1} reachable".format(portal_host, portal_port))
-        except OSError as exc:
-            details.append("[NetworkReady] Portal TCP {0}:{1} not reachable: {2}".format(
-                portal_host, portal_port, exc))
-            ok = False
+    # Info: default gateway (non-blocking)
+    gw = _get_default_gateway()
+    details.append("[NetworkReady] Default gateway: {0}".format(gw or "unknown"))
+
+    # PRIMARY CHECK: TCP connect to portal
+    try:
+        s = socket.create_connection((portal_host, portal_port), timeout=3)
+        s.close()
+        details.append("[NetworkReady] Portal TCP {0}:{1}: reachable".format(portal_host, portal_port))
+        ok = True
+    except OSError as exc:
+        details.append("[NetworkReady] Portal TCP {0}:{1}: not reachable - {2}".format(
+            portal_host, portal_port, exc))
+        ok = False
 
     # Log on first call or state change
     if not _network_ready_logged or not ok:
