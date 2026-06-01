@@ -856,8 +856,21 @@ def _has_console_stdin():
 
 def _init_config_gui():
     """Use tkinter dialogs to collect init config when no console is available."""
-    import tkinter as tk
-    from tkinter import simpledialog, messagebox
+    try:
+        import tkinter as tk
+        from tkinter import simpledialog, messagebox
+    except ImportError as exc:
+        # tkinter not available - write error to log
+        try:
+            log_path = SCRIPT_DIR / "campus_auto_login_py.log"
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with log_path.open("a", encoding="utf-8") as f:
+                f.write("[{0}] GUI init failed: {1}\n".format(
+                    time.strftime("%Y-%m-%d %H:%M:%S"), exc))
+                f.write("Please use campus_auto_login_cli.exe --init instead.\n")
+        except Exception:
+            pass
+        return None
 
     root = tk.Tk()
     root.withdraw()
