@@ -133,19 +133,37 @@ def _is_virtual_ip(ip):
     return any(ip.startswith(pfx) for pfx in _VIRTUAL_IP_PREFIXES)
 
 
+def _run_cmd_hidden(args, timeout=15):
+    """Run a command with CREATE_NO_WINDOW to avoid console flash."""
+    try:
+        result = subprocess.run(
+            args, capture_output=True, timeout=timeout,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        return _decode_command_output(result.stdout)
+    except Exception:
+        return ""
+
+
+def _run_powershell_hidden(script, timeout=15):
+    """Run a PowerShell script hidden, return stdout string."""
+    return _run_cmd_hidden(
+        ["powershell.exe", "-NoProfile", "-Command", script],
+        timeout=timeout,
+    )
+
+
 def _get_physical_adapter_ips():
     """Get IPv4 addresses from physical network adapters, excluding virtual ones.
     Returns list of (ip_address, ifIndex, alias, description) tuples."""
     results = []
     try:
-        out = os.popen(
-            'powershell.exe -NoProfile -Command "'
+        out = _run_powershell_hidden(
             'Get-NetAdapter | Where-Object {$_.Status -eq \'Up\'} | ForEach-Object { '
             '$ip = Get-NetIPAddress -InterfaceIndex $_.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue | '
             'Where-Object {$_.IPAddress -ne \'127.0.0.1\' -and $_.IPAddress -notlike \'169.254.*\'} | Select-Object -First 1; '
             'if ($ip) { \'{0}|{1}|{2}|{3}\' -f $ip.IPAddress, $_.ifIndex, $_.Name, $_.InterfaceDescription }'
-            '}"'
-        ).read(4096).strip()
+        ).strip()
         for line in out.splitlines():
             if "|" not in line:
                 continue
@@ -428,11 +446,11 @@ def _try_route_repair(portal_host="10.200.84.3", timeout=3):
     if not gw:
         return False
     # Only add a /32 host route for the specific portal IP
-    route_cmd = "route add {0} mask 255.255.255.255 {1}".format(portal_host, gw)
+    route_args = ["route", "add", portal_host, "mask", "255.255.255.255", gw]
     if ifidx:
-        route_cmd += " if {0}".format(ifidx)
+        route_args += ["if", str(ifidx)]
     try:
-        result = os.popen(route_cmd).read(512)
+        result = _run_cmd_hidden(route_args, timeout=10)
         if "The requested operation requires elevation" in result or "Access is denied" in result:
             return False
         # Test if portal is now reachable
@@ -450,7 +468,7 @@ def _try_route_repair(portal_host="10.200.84.3", timeout=3):
 def _cleanup_route_repair(portal_host="10.200.84.3"):
     """Remove temporary host route added by _try_route_repair."""
     try:
-        os.popen("route delete {0}".format(portal_host)).read(256)
+        _run_cmd_hidden(["route", "delete", portal_host], timeout=10)
     except Exception:
         pass
 
@@ -1505,11 +1523,11 @@ _network_ready_logged = False
 def _get_system_boot_time():
     """Return the Unix timestamp of the last Windows boot (best-effort)."""
     try:
-        out = os.popen(
-            'powershell.exe -NoProfile -Command "'
+        out = _run_powershell_hidden(
             '(Get-CimInstance Win32_OperatingSystem).LastBootUpTime | '
-            'ForEach-Object { [int]([DateTimeOffset]::new($_).ToUnixTimeSeconds()) }"'
-        ).read(256).strip()
+            'ForEach-Object { [int]([DateTimeOffset]::new($_).ToUnixTimeSeconds()) }',
+            timeout=10,
+        ).strip()
         for line in out.splitlines():
             val = line.strip()
             if val.isdigit():
@@ -1701,11 +1719,11 @@ def _test_portal_candidate(base_url, timeout=3):
 def _get_default_gateway():
     """Get the default gateway IP (read-only, best-effort)."""
     try:
-        output = os.popen(
-            'powershell.exe -NoProfile -Command "'
+        output = _run_powershell_hidden(
             'Get-NetRoute -AddressFamily IPv4 -DestinationPrefix \'0.0.0.0/0\' -ErrorAction SilentlyContinue | '
-            'Sort-Object RouteMetric | Select-Object -First 1 | ForEach-Object { $_.NextHop }"'
-        ).read(512).strip()
+            'Sort-Object RouteMetric | Select-Object -First 1 | ForEach-Object { $_.NextHop }',
+            timeout=10,
+        ).strip()
         for line in output.splitlines():
             gw = line.strip()
             if gw and gw != "0.0.0.0" and re.match(r"^\d{1,3}(?:\.\d{1,3}){3}$", gw):
@@ -1713,7 +1731,7 @@ def _get_default_gateway():
     except Exception:
         pass
     try:
-        output = os.popen("route print 0.0.0.0").read(2048)
+        output = _run_cmd_hidden(["route", "print", "0.0.0.0"], timeout=10)
         for line in output.splitlines():
             parts = line.split()
             if len(parts) >= 3 and parts[0] == "0.0.0.0":
@@ -1839,7 +1857,7 @@ def _get_portal_route_info(portal_host):
     result = {"ifIndex": None, "alias": None, "sourceIP": None, "nextHop": None, "metric": None}
     # Use route print (always available on Windows)
     try:
-        route_out = os.popen("route print {0}".format(portal_host)).read(2048)
+        route_out = _run_cmd_hidden(["route", "print", portal_host], timeout=10)
         in_active = False
         for line in route_out.splitlines():
             if "Active Routes" in line:
@@ -1862,12 +1880,11 @@ def _get_portal_route_info(portal_host):
     if result["sourceIP"]:
         try:
             src_ip = result["sourceIP"]
-            ps_out = os.popen(
-                'powershell.exe -NoProfile -Command "'
+            ps_out = _run_powershell_hidden(
                 'Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.IPAddress -eq \'' + src_ip + '\'} | '
-                'Select-Object -First 1 | ForEach-Object { \'%s|%s|%s\' -f $_.InterfaceIndex, $_.InterfaceAlias, $_.IPAddress }'
-                '"'
-            ).read(512).strip()
+                'Select-Object -First 1 | ForEach-Object { \'%s|%s|%s\' -f $_.InterfaceIndex, $_.InterfaceAlias, $_.IPAddress }',
+                timeout=10,
+            ).strip()
             if ps_out and "|" in ps_out:
                 parts = ps_out.split("|")
                 if len(parts) >= 2:
@@ -1907,11 +1924,11 @@ def _detect_virtual_adapters():
     Returns list of (Name, InterfaceDescription, Status, ifIndex) tuples."""
     found = []
     try:
-        output = os.popen(
-            'powershell.exe -NoProfile -Command "'
+        output = _run_powershell_hidden(
             'Get-NetAdapter | Select-Object Name, InterfaceDescription, Status, ifIndex | '
-            'ForEach-Object { \'{0}|{1}|{2}|{3}\' -f $_.Name, $_.InterfaceDescription, $_.Status, $_.ifIndex }"'
-        ).read(8192).strip()
+            'ForEach-Object { \'{0}|{1}|{2}|{3}\' -f $_.Name, $_.InterfaceDescription, $_.Status, $_.ifIndex }',
+            timeout=15,
+        ).strip()
         for line in output.splitlines():
             if not line or "|" not in line:
                 continue
@@ -2209,7 +2226,6 @@ def show_log_window(icon=None, item=None):
 def quit_app(icon, item):
     """Stop the tray icon and exit the process."""
     icon.stop()
-    import os
     os._exit(0)
 
 

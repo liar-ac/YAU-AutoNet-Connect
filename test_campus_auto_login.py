@@ -336,19 +336,19 @@ class TestTestPortalCandidate(unittest.TestCase):
 
 
 class TestGetDefaultGateway(unittest.TestCase):
-    @patch("campus_auto_login.os.popen")
-    def test_parses_gateway(self, mock_popen):
-        mock_popen.return_value.read.return_value = """
-Active Routes:
-Network Destination        Netmask          Gateway       Interface  Metric
-          0.0.0.0          0.0.0.0      10.211.223.1   10.211.223.248     35
-"""
+    @patch("campus_auto_login.subprocess.run")
+    def test_parses_gateway(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=b"10.211.223.1\n",
+            stderr=b"",
+        )
         gw = _get_default_gateway()
         self.assertEqual(gw, "10.211.223.1")
 
-    @patch("campus_auto_login.os.popen")
-    def test_returns_none_on_failure(self, mock_popen):
-        mock_popen.side_effect = Exception("fail")
+    @patch("campus_auto_login.subprocess.run")
+    def test_returns_none_on_failure(self, mock_run):
+        mock_run.side_effect = Exception("fail")
         self.assertIsNone(_get_default_gateway())
 
 
@@ -676,28 +676,27 @@ class TestEnsureProcessProxyBypass(unittest.TestCase):
 
 class TestGetPortalRouteInfo(unittest.TestCase):
     def test_parses_route_output(self):
-        route_output = """
-===========================================================================
-Active Routes:
-     Network Destination        Netmask          Gateway       Interface  Metric
-          0.0.0.0          0.0.0.0      10.211.0.1   10.211.223.248     35
-===========================================================================
-"""
-        with patch("campus_auto_login.os.popen") as mock_popen:
-            mock_handle = MagicMock()
+        route_output = (
+            "===========================================================================\n"
+            "Active Routes:\n"
+            "     Network Destination        Netmask          Gateway       Interface  Metric\n"
+            "          0.0.0.0          0.0.0.0      10.211.0.1   10.211.223.248     35\n"
+            "===========================================================================\n"
+        )
+        with patch("campus_auto_login.subprocess.run") as mock_run:
             # First call: route print, second call: PowerShell (optional)
-            mock_handle.read.side_effect = [route_output, ""]
-            mock_popen.return_value = mock_handle
+            mock_run.side_effect = [
+                MagicMock(returncode=0, stdout=route_output.encode(), stderr=b""),
+                MagicMock(returncode=0, stdout=b"", stderr=b""),
+            ]
             info = _get_portal_route_info("10.200.84.3")
             self.assertEqual(info["nextHop"], "10.211.0.1")
             self.assertEqual(info["sourceIP"], "10.211.223.248")
             self.assertEqual(info["metric"], "35")
 
     def test_returns_empty_on_failure(self):
-        with patch("campus_auto_login.os.popen") as mock_popen:
-            mock_handle = MagicMock()
-            mock_handle.read.return_value = ""
-            mock_popen.return_value = mock_handle
+        with patch("campus_auto_login.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=b"", stderr=b"")
             info = _get_portal_route_info("10.200.84.3")
             self.assertIsNone(info["nextHop"])
 
