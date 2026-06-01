@@ -830,10 +830,57 @@ def read_powershell_config(config_path):
     }
 
 
+def _has_console_stdin():
+    """Check if stdin is connected to a real console (not piped or absent)."""
+    try:
+        return sys.stdin is not None and sys.stdin.isatty()
+    except (AttributeError, OSError):
+        return False
+
+
+def _init_config_gui():
+    """Use tkinter dialogs to collect init config when no console is available."""
+    import tkinter as tk
+    from tkinter import simpledialog, messagebox
+
+    root = tk.Tk()
+    root.withdraw()
+
+    username = simpledialog.askstring("校园网自动登录 - 初始化", "校园网用户名:", parent=root)
+    if not username:
+        messagebox.showinfo("取消", "初始化已取消。", parent=root)
+        root.destroy()
+        return None
+
+    password = simpledialog.askstring("校园网自动登录 - 初始化", "校园网密码:", show="*", parent=root)
+    if not password:
+        messagebox.showinfo("取消", "初始化已取消。", parent=root)
+        root.destroy()
+        return None
+
+    suffix = simpledialog.askstring(
+        "校园网自动登录 - 初始化",
+        "运营商后缀:\n直接回车为默认\n@dx 电信\n@lt 联通",
+        parent=root,
+    )
+    if suffix is None:
+        suffix = ""
+
+    root.destroy()
+    return username, password, suffix
+
+
 def init_config(args):
-    username = input("Campus username:")
-    password = getpass.getpass("Campus password:")
-    suffix = input("Service suffix(empty for default,@dx for telecom,@lt for unicom):")
+    if _has_console_stdin():
+        username = input("Campus username:")
+        password = getpass.getpass("Campus password:")
+        suffix = input("Service suffix(empty for default,@dx for telecom,@lt for unicom):")
+    else:
+        result = _init_config_gui()
+        if result is None:
+            return
+        username, password, suffix = result
+
     data = {
         "portal_base": args.portal_base.rstrip("/"),
         "username": username,
@@ -844,7 +891,15 @@ def init_config(args):
     args.config.parent.mkdir(parents=True, exist_ok=True)
     with args.config.open("w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
-    write_log(args.log, "Config created:{0}".format(args.config))
+    if _has_console_stdin():
+        write_log(args.log, "Config created:{0}".format(args.config))
+    else:
+        import tkinter as tk
+        from tkinter import messagebox
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showinfo("初始化完成", "配置已保存到:\n{0}\n\n双击 campus_auto_login.exe 即可使用。".format(args.config), parent=root)
+        root.destroy()
 
 
 def get_status(portal_base, allow_proxy_bypass=False):

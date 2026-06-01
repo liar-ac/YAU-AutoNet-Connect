@@ -84,13 +84,15 @@ YAU-AutoNet-Connect 是一个面向延安大学校园网的自动登录工具，
 
 ### 第二步：初始化配置（仅首次）
 
-在 exe 所在目录打开 PowerShell，用 **CLI 版** 初始化：
+在 exe 所在目录打开 PowerShell，任选一种方式初始化：
 
 ```powershell
+# 方式一：命令行版（推荐，有实时提示）
 .\campus_auto_login_cli.exe --init
-```
 
-> **必须用 `campus_auto_login_cli.exe`，不能用 `campus_auto_login.exe`。** 后台版是静默运行的，没有命令行交互能力。
+# 方式二：后台版（会弹出图形窗口输入）
+.\campus_auto_login.exe --init
+```
 
 按提示依次输入：
 
