@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.0.7 (2026-06-01)
+
+### Bug修复
+- 修复network_ready()私有IP检查误匹配非私有IP（172.200.x.x等）的问题。
+- 修复_get_portal_route_info中PowerShell命令格式化问题。
+- 修复重复的虚拟网卡关键词列表，合并为统一的_VIRTUAL_KEYWORDS_NET。
+- 移除_powershell_no_proxy_fetch中冗余的import。
+- 修复临时代理旁路函数中的死代码。
+
+### 改进
+- campus_auto_login.exe --init现在支持GUI弹窗输入，无需CLI版即可初始化。
+- README更新：初始化说明改为支持两种方式（CLI版命令行 / 后台版GUI弹窗）。
+- 配置错误信息改为指向exe而非Python脚本。
+
 ## v1.0.6 (2026-05-27)
 
 ### Bug修复
