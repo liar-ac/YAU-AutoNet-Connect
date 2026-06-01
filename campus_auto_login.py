@@ -2179,13 +2179,19 @@ _tk_root = None
 def _drain_log_queue(widget, text_widget):
     """Periodically pull log lines from the queue into the text widget."""
     global _log_drain_id
+    lines_added = False
     while True:
         try:
             line = _log_queue.get_nowait()
+            if not lines_added:
+                text_widget.configure(state="normal")
+                lines_added = True
             text_widget.insert("end", line + "\n")
             text_widget.see("end")
         except queue.Empty:
             break
+    if lines_added:
+        text_widget.configure(state="disabled")
     _log_drain_id = widget.after(200, _drain_log_queue, widget, text_widget)
 
 
@@ -2206,7 +2212,7 @@ def _create_log_window():
     win.geometry("640x420")
     win.resizable(True, True)
 
-    text_widget = ScrolledText(win, font=("Consolas", 9), wrap="word", state="normal")
+    text_widget = ScrolledText(win, font=("Consolas", 9), wrap="word", state="disabled")
     text_widget.pack(fill="both", expand=True, padx=4, pady=4)
 
     def on_close():
