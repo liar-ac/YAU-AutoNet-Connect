@@ -2329,18 +2329,24 @@ def run_tray_mode(args):
             write_log(args.log, "发现portal: {0}".format(discovered))
             config["portal_base"] = discovered
         failure_state = {"consecutive_failures": 0}
+        FAST_INTERVAL = 10  # seconds between checks when network is down
         while True:
             try:
                 login_once(config, args, failure_state=failure_state)
             except Exception as exc:
                 write_log(args.log, "登录异常（{0}），{1}秒后重试".format(exc, args.interval))
+            # Dynamic interval: fast when recovering, normal when stable
+            if failure_state["consecutive_failures"] > 0:
+                sleep_time = FAST_INTERVAL
+            else:
+                sleep_time = args.interval
             # Sleep with wake-from-sleep detection:
             # If wall-clock jumps more than interval*2, system just woke from sleep.
             # In that case, skip remaining sleep and check immediately.
             wall_start = time.time()
-            time.sleep(args.interval)
+            time.sleep(sleep_time)
             wall_elapsed = time.time() - wall_start
-            if wall_elapsed > args.interval * 2:
+            if wall_elapsed > sleep_time * 2:
                 write_log(args.log, "唤醒检测，立即检查网络")
 
     login_thread = threading.Thread(target=login_loop, daemon=True)
