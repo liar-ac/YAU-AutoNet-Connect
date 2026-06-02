@@ -1942,60 +1942,60 @@ def diagnose_portal_connectivity(portal_base, timeout=3, log_fn=None):
     port = parsed.port or 80
     scheme = parsed.scheme or "http"
 
-    lines.append("--- Portal Connectivity Diagnostic ---")
-    lines.append("Portal host: {0}".format(host))
-    lines.append("Portal base: {0}".format(portal_base.rstrip("/")))
-    lines.append("Status URL: {0}/drcom/chkstatus".format(portal_base.rstrip("/")))
-    lines.append("Login URL: {0}://{1}:801/eportal/portal/login".format(scheme, host))
+    lines.append("--- Portal连通性诊断 ---")
+    lines.append("Portal地址: {0}".format(host))
+    lines.append("Portal基础URL: {0}".format(portal_base.rstrip("/")))
+    lines.append("状态URL: {0}/drcom/chkstatus".format(portal_base.rstrip("/")))
+    lines.append("登录URL: {0}://{1}:801/eportal/portal/login".format(scheme, host))
 
     # Boot time info
     boot_elapsed = _seconds_since_boot()
     if boot_elapsed > 0:
-        lines.append("System uptime: {0}s ({1}min)".format(boot_elapsed, boot_elapsed // 60))
+        lines.append("系统运行时间: {0}秒 ({1}分钟)".format(boot_elapsed, boot_elapsed // 60))
         if boot_elapsed < BOOT_GRACE_SECONDS:
-            lines.append("WARNING: Still within boot grace period ({0}s/{1}s)".format(
+            lines.append("警告: 仍在开机等待期({0}秒/{1}秒)".format(
                 boot_elapsed, BOOT_GRACE_SECONDS))
 
     # Portal route info (the CORRECT interface for reaching the portal)
     route_info = _get_portal_route_info(host)
-    lines.append("Portal route interface: {0} (ifIndex={1})".format(
+    lines.append("Portal路由接口: {0} (ifIndex={1})".format(
         route_info.get("alias") or "unknown", route_info.get("ifIndex") or "?"))
-    lines.append("Portal route source IPv4: {0}".format(route_info.get("sourceIP") or "unknown"))
-    lines.append("Portal route next hop: {0}".format(route_info.get("nextHop") or "unknown"))
-    lines.append("Portal route metric: {0}".format(route_info.get("metric") or "unknown"))
+    lines.append("Portal路由源IP: {0}".format(route_info.get("sourceIP") or "未知"))
+    lines.append("Portal路由下一跳: {0}".format(route_info.get("nextHop") or "未知"))
+    lines.append("Portal路由度量: {0}".format(route_info.get("metric") or "未知"))
 
     # Default gateway
     gw = _get_default_gateway()
-    lines.append("Default gateway: {0}".format(gw or "unknown"))
+    lines.append("默认网关: {0}".format(gw or "未知"))
 
     # Warn if route source looks like virtual adapter
     src_ip = route_info.get("sourceIP") or ""
     if src_ip.startswith("192.168.144.") or src_ip.startswith("192.168.56.") or src_ip.startswith("172.16."):
-        lines.append("WARNING: Portal route source IPv4 may belong to a virtual/host-only adapter.")
+        lines.append("警告: Portal路由源IP可能属于虚拟/仅主机适配器")
 
     # Virtual adapters
     vnet = _detect_virtual_adapters()
     if vnet:
         for name, desc, status, ifidx in vnet:
-            lines.append("Virtual adapter: {0} ({1}) [{2}] ifIndex={3}".format(name, desc, status, ifidx))
+            lines.append("虚拟适配器: {0} ({1}) [{2}] ifIndex={3}".format(name, desc, status, ifidx))
     else:
-        lines.append("Virtual adapters: none detected")
+        lines.append("虚拟适配器: 未检测到")
 
     # Socket test port 80
     try:
         sock = socket.create_connection((host, port), timeout=timeout)
         sock.close()
-        lines.append("Raw socket {0}:{1}: SUCCESS".format(host, port))
+        lines.append("Socket {0}:{1}: 成功".format(host, port))
     except OSError as exc:
-        lines.append("Raw socket {0}:{1}: FAIL - {2}".format(host, port, exc))
+        lines.append("Socket {0}:{1}: 失败 - {2}".format(host, port, exc))
 
     # Socket test port 801
     try:
         sock = socket.create_connection((host, 801), timeout=timeout)
         sock.close()
-        lines.append("Raw socket {0}:801: SUCCESS".format(host))
+        lines.append("Socket {0}:801: 成功".format(host))
     except OSError as exc:
-        lines.append("Raw socket {0}:801: FAIL - {1}".format(host, exc))
+        lines.append("Socket {0}:801: 失败 - {1}".format(host, exc))
 
     # Raw direct HTTP status check
     try:
@@ -2006,9 +2006,9 @@ def diagnose_portal_connectivity(portal_base, timeout=3, log_fn=None):
         )
         obj = jsonp_to_obj(text)
         result_val = obj.get("result", "?")
-        lines.append("Raw direct HTTP status: result={0} (SUCCESS)".format(result_val))
+        lines.append("直连HTTP状态: result={0} (成功)".format(result_val))
     except Exception as exc:
-        lines.append("Raw direct HTTP status: FAIL - {0}".format(exc))
+        lines.append("直连HTTP状态: 失败 - {0}".format(exc))
 
     # Proxy details
     proxy_server, proxy_override = _get_proxy_details()
@@ -2028,16 +2028,16 @@ def diagnose_portal_connectivity(portal_base, timeout=3, log_fn=None):
             except Exception:
                 proxy_env_vals.append("{0}=<set>".format(name))
     if proxy_env_vals:
-        lines.append("Proxy env vars: {0}".format(", ".join(proxy_env_vals)))
+        lines.append("代理环境变量: {0}".format(", ".join(proxy_env_vals)))
     else:
-        lines.append("Proxy env vars: none")
+        lines.append("代理环境变量: 无")
 
     # NO_PROXY check
     no_proxy = os.environ.get("NO_PROXY") or os.environ.get("no_proxy") or ""
     has_portal_in_noproxy = "10." in no_proxy or "10.200.84.3" in no_proxy
     lines.append("NO_PROXY includes portal subnet: {0}".format("YES" if has_portal_in_noproxy else "NO"))
 
-    lines.append("--- End Diagnostic ---")
+    lines.append("--- 诊断结束 ---")
 
     if log_fn:
         for line in lines:
@@ -2065,12 +2065,12 @@ def log_portal_failure_matrix(portal_base, log_fn=None):
     host = parse.urlsplit(portal_base.rstrip("/")).hostname or "10.200.84.3"
     proxy_server, _proxy_override = _get_proxy_details()
     cached = _load_campus_route_cache()
-    _log("=== Failure Matrix ===")
-    _log("SSID: {0}".format(get_current_wifi_ssid() or "unknown"))
-    _log("Gateway: {0}".format(_get_default_gateway() or "unknown"))
-    _log("Proxy: {0}".format(proxy_server or "not set"))
+    _log("=== 故障矩阵 ===")
+    _log("SSID: {0}".format(get_current_wifi_ssid() or "未知"))
+    _log("网关: {0}".format(_get_default_gateway() or "未知"))
+    _log("代理: {0}".format(proxy_server or "未设置"))
     if cached:
-        _log("Cached campus route: gateway={0}, source_ip={1}, ifIndex={2}, ssid={3}, updated_at={4}".format(
+        _log("缓存路由: gateway={0}, source_ip={1}, ifIndex={2}, ssid={3}, updated_at={4}".format(
             cached.get("gateway") or "?", cached.get("source_ip") or "?",
             cached.get("ifIndex") or "?", cached.get("ssid") or "?",
             cached.get("updated_at") or "?"))
@@ -2079,20 +2079,20 @@ def log_portal_failure_matrix(portal_base, log_fn=None):
             try:
                 s = socket.create_connection((host, 80), timeout=3, source_address=(cached_ip, 0))
                 s.close()
-                _log("  Cached source {0}: SUCCESS".format(cached_ip))
+                _log("  缓存源IP {0}: 成功".format(cached_ip))
             except OSError as e:
-                _log("  Cached source {0}: FAIL - {1}".format(cached_ip, e))
+                _log("  缓存源IP {0}: 失败 - {1}".format(cached_ip, e))
     adapters = _get_physical_adapter_ips()
     for ip, ifidx, name, desc, virt in adapters:
-        _log("  Adapter: {0} IP={1} ifIdx={2} virtual={3}".format(name, ip, ifidx, virt))
+        _log("  适配器: {0} IP={1} ifIdx={2} virtual={3}".format(name, ip, ifidx, virt))
     for ip, ifidx, name, desc, virt in adapters:
         try:
             s = socket.create_connection((host, 80), timeout=3, source_address=(ip, 0))
             s.close()
-            _log("  Source {0} ({1}): SUCCESS".format(ip, name))
+            _log("  源IP {0} ({1}): 成功".format(ip, name))
         except OSError as e:
-            _log("  Source {0} ({1}): FAIL - {2}".format(ip, name, e))
-    _log("=== End Failure Matrix ===")
+            _log("  源IP {0} ({1}): 失败 - {2}".format(ip, name, e))
+    _log("=== 故障矩阵结束 ===")
 
 
 def wait_for_portal_ready(portal_base, timeout_seconds=60, interval=5, log_fn=None,
@@ -2375,7 +2375,7 @@ def main():
 
     if args.check_wifi:
         ssid = get_current_wifi_ssid()
-        write_log(args.log, "Current Wi-Fi SSID: {0}".format(ssid or "<not connected>"))
+        write_log(args.log, "当前Wi-Fi: {0}".format(ssid or "未连接"))
         if args.campus_ssid:
             check_wifi_and_warn(args.campus_ssid, log_fn=lambda msg: write_log(args.log, msg))
         return 0
@@ -2383,24 +2383,22 @@ def main():
     if args.set_campus_ssid:
         ssid = get_current_wifi_ssid()
         if not ssid:
-            write_log(args.log, "ERROR: No Wi-Fi SSID detected. Connect to campus Wi-Fi first.")
+            write_log(args.log, "未检测到Wi-Fi，请先连接校园网Wi-Fi")
             return 1
-        write_log(args.log, "Current Wi-Fi SSID: {0}".format(ssid))
-        write_log(args.log, "To save this as campus SSID, run:")
+        write_log(args.log, "当前Wi-Fi: {0}".format(ssid))
+        write_log(args.log, "保存为校园网SSID:")
         write_log(args.log, '  campus_auto_login_cli.exe --init --campus-ssid "{0}"'.format(ssid))
-        write_log(args.log, "Or add to config manually: \"campus_ssid\": \"{0}\"".format(ssid))
         return 0
 
     if args.force_portal_reachable:
-        write_log(args.log, "=== Force Portal Reachable Mode ===")
-        write_log(args.log, "Portal target: {0}".format(args.portal_base))
-        # Show current environment
+        write_log(args.log, "=== 强制portal连通模式 ===")
+        write_log(args.log, "目标portal: {0}".format(args.portal_base))
         ssid = get_current_wifi_ssid()
-        write_log(args.log, "Current Wi-Fi SSID: {0}".format(ssid or "<not connected>"))
+        write_log(args.log, "当前Wi-Fi: {0}".format(ssid or "未连接"))
         gw = _get_default_gateway()
-        write_log(args.log, "Default gateway: {0}".format(gw or "unknown"))
+        write_log(args.log, "默认网关: {0}".format(gw or "未知"))
         proxy_server, proxy_override = _get_proxy_details()
-        write_log(args.log, "System proxy: {0}".format(proxy_server or "not set"))
+        write_log(args.log, "系统代理: {0}".format(proxy_server or "未设置"))
         # Try each layer explicitly, but allow time for Wi-Fi/DHCP route recovery.
         test_url = "{0}/drcom/chkstatus?callback=_fr&jsVersion=4.X&v=1&lang=zh".format(args.portal_base.rstrip("/"))
         deadline = time.time() + 75
@@ -2413,7 +2411,7 @@ def main():
                     test_url, timeout=5, purpose="force",
                     allow_proxy_bypass=args.allow_temporary_proxy_bypass,
                 )
-                write_log(args.log, "Portal reachable via layer: {0}".format(layer))
+                write_log(args.log, "portal可达: {0}".format(layer))
                 _cache_campus_route(args.portal_base)
                 return 0
             except OSError as exc:
@@ -2425,7 +2423,7 @@ def main():
         try:
             raise last_error or OSError("portal unreachable")
         except OSError as exc:
-            write_log(args.log, "ALL LAYERS FAILED after 75s: {0}".format(exc))
+            write_log(args.log, "所有传输层失败(75秒): {0}".format(exc))
             log_portal_failure_matrix(args.portal_base, log_fn=lambda msg: write_log(args.log, msg))
             return 1
 

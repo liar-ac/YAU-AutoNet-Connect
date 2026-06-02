@@ -285,8 +285,8 @@ class TestDiagnosePortalConnectivity(unittest.TestCase):
         mock_fetch.return_value = 'cb({"result":1})'
         lines = diagnose_portal_connectivity("http://10.200.84.3")
         self.assertTrue(len(lines) > 5)
-        self.assertTrue(any("Portal host" in l for l in lines))
-        self.assertTrue(any("Raw socket" in l for l in lines))
+        self.assertTrue(any("Portal" in l for l in lines))
+        self.assertTrue(any("Socket" in l for l in lines))
 
     @patch("campus_auto_login._detect_virtual_adapters", return_value=[])
     @patch("campus_auto_login._get_portal_route_info")
@@ -295,7 +295,7 @@ class TestDiagnosePortalConnectivity(unittest.TestCase):
     def test_socket_fail_shown(self, mock_fetch, mock_sock, mock_route, mock_vnet):
         mock_route.return_value = {"ifIndex": None, "alias": None, "sourceIP": None, "nextHop": None, "metric": None}
         lines = diagnose_portal_connectivity("http://10.200.84.3")
-        self.assertTrue(any("FAIL" in l for l in lines))
+        self.assertTrue(any("失败" in l for l in lines))
 
 
 class TestExtractPortalFromUrl(unittest.TestCase):
@@ -711,9 +711,9 @@ class TestDiagnoseContainsRouteInfo(unittest.TestCase):
         mock_fetch.return_value = 'cb({"result":1})'
         lines = diagnose_portal_connectivity("http://10.200.84.3")
         text = "\n".join(lines)
-        self.assertIn("Portal route interface: WLAN", text)
-        self.assertIn("Portal route source IPv4: 10.211.223.248", text)
-        self.assertIn("Portal route next hop: 10.211.0.1", text)
+        self.assertIn("Portal路由接口: WLAN", text)
+        self.assertIn("Portal路由源IP: 10.211.223.248", text)
+        self.assertIn("Portal路由下一跳: 10.211.0.1", text)
         self.assertIn("NO_PROXY includes portal subnet", text)
 
 
