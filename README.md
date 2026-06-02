@@ -120,7 +120,7 @@ YAU-AutoNet-Connect 是一个面向延安大学校园网的自动登录工具，
 
 程序运行时会自动检测网络状态：在线时跳过，离线时尝试登录。日志超过 1MB 会自动归档为 `.log.old`。
 
-> **v1.0.4 说明：** 本次更新没有改变启动方式和后台运行方式。双击 exe 后仍在系统托盘静默运行，不需要长期打开终端窗口。v1.0.4 重点增强 Clash 系统代理开启场景下的 portal 直连、路由恢复、Wi-Fi 自动重连和故障诊断能力。
+> **v1.0.7 说明：** 双击 exe 后仍在系统托盘静默运行，不需要长期打开终端窗口。v1.0.7 增强了开机网络就绪检测、Wi-Fi 自动重连、休眠唤醒检测，并简化了日志输出。
 
 ---
 
@@ -306,8 +306,8 @@ python watch_build.py
 | 托盘图标找不到 | 查看任务栏隐藏图标区域，或检查任务管理器 |
 | 提示"已在运行中" | 已有实例在运行，任务管理器结束已有进程 |
 | `--check` 显示 Offline | 确认已连接校园网，尝试运行 `--once` |
-| 开启 Clash 系统代理后提示 Portal unreachable | 先运行 `campus_auto_login_cli.exe --force-portal-reachable --allow-temporary-proxy-bypass`。v1.0.4 会优先使用 raw direct 直连，并在失败时尝试缓存源IP、网卡绑定、路由修复、PowerShell no-proxy 和临时代理旁路 |
-| `WinError 10065` | 表示 Windows 认为 `10.200.84.3` 不可路由。v1.0.4 会等待路由恢复、尝试重连校园网 Wi-Fi，并输出 Failure Matrix。仍失败时请检查 WLAN 是否被硬件/飞行模式禁用 |
+| 开启 Clash 系统代理后提示 Portal unreachable | 先运行 `campus_auto_login_cli.exe --force-portal-reachable --allow-temporary-proxy-bypass`。程序会优先使用 raw direct 直连，并在失败时尝试缓存源IP、网卡绑定、路由修复、PowerShell no-proxy 和临时代理旁路 |
+| `WinError 10065` | 表示 Windows 认为 `10.200.84.3` 不可路由。程序会等待路由恢复、尝试重连校园网 Wi-Fi，并输出 Failure Matrix。仍失败时请检查 WLAN 是否被硬件/飞行模式禁用 |
 | 日志出现“无线局域网接口电源关闭” | 程序会尝试启用 WLAN 接口和软件无线电后重连。若仍失败，说明 Windows 不允许软件恢复，需要手动打开 Wi-Fi 或关闭飞行模式 |
 | 自动发现的 portal 地址不正确 | 使用 `--portal-base http://x.x.x.x` 手动指定正确的校园网网关地址 |
 

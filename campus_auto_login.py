@@ -1023,7 +1023,7 @@ def login_once(config, args, failure_state=None):
             log_fn=lambda msg: write_log(args.log, msg),
         )
         if discovered.rstrip("/") != config["portal_base"].rstrip("/"):
-            write_log(args.log, "Switching to discovered portal: {0}".format(discovered))
+            write_log(args.log, "切换到发现的portal: {0}".format(discovered))
             config["portal_base"] = discovered
             status = get_status(config["portal_base"], allow_proxy_bypass=allow_bypass)
             if not status["reachable"]:
@@ -1104,12 +1104,12 @@ def login_once(config, args, failure_state=None):
 def check_only(args):
     status = get_status(args.portal_base)
     if not status["reachable"]:
-        write_log(args.log, "Portal unreachable:{0}".format(status["error"]))
+        write_log(args.log, "portal不可达: {0}".format(status["error"]))
         return 2
     if status["online"]:
-        write_log(args.log, "Already online.")
+        write_log(args.log, "已连接")
         return 0
-    write_log(args.log, "Offline from portal status.")
+    write_log(args.log, "未认证")
     return 1
 
 
@@ -1364,12 +1364,12 @@ def _enable_wifi_software_radio(log_fn=None):
         result = wlanapi.WlanOpenHandle(2, None, ctypes.byref(negotiated_version), ctypes.byref(client_handle))
         if result != 0:
             if log_fn:
-                log_fn("Native Wi-Fi open failed: {0}".format(_wlan_error_message(result)))
+                log_fn("Wi-Fi API打开失败: {0}".format(_wlan_error_message(result)))
             return False
         result = wlanapi.WlanEnumInterfaces(client_handle, None, ctypes.byref(interface_list))
         if result != 0 or not interface_list:
             if log_fn:
-                log_fn("Native Wi-Fi interface enumeration failed: {0}".format(_wlan_error_message(result)))
+                log_fn("Wi-Fi接口枚举失败: {0}".format(_wlan_error_message(result)))
             return False
         count = int(interface_list.contents.dwNumberOfItems)
         base = ctypes.addressof(interface_list.contents.InterfaceInfo)
@@ -1395,12 +1395,12 @@ def _enable_wifi_software_radio(log_fn=None):
                 if result == 0:
                     any_success = True
                 elif log_fn:
-                    log_fn("Native Wi-Fi radio enable failed on {0}: {1}".format(
+                    log_fn("Wi-Fi射频开启失败({0}): {1}".format(
                         description or "unknown", _wlan_error_message(result)))
         return any_success
     except Exception as exc:
         if log_fn:
-            log_fn("Native Wi-Fi radio enable failed: {0}".format(exc))
+            log_fn("Wi-Fi射频开启失败: {0}".format(exc))
         return False
     finally:
         try:
@@ -1421,7 +1421,7 @@ def ensure_wifi_interface_enabled(log_fn=None):
     if not adapter_name:
         return False
     if log_fn:
-        log_fn("Attempting to enable Wi-Fi interface: {0}".format(adapter_name))
+        log_fn("尝试启用Wi-Fi接口: {0}".format(adapter_name))
     commands = [
         ["netsh", "interface", "set", "interface", "name={0}".format(adapter_name), "admin=enabled"],
         [
@@ -1443,10 +1443,10 @@ def ensure_wifi_interface_enabled(log_fn=None):
             elif log_fn:
                 err = _decode_command_output(result.stderr or result.stdout).strip()
                 if err:
-                    log_fn("Wi-Fi enable step failed: {0}".format(err))
+                    log_fn("Wi-Fi启用失败: {0}".format(err))
         except Exception as exc:
             if log_fn:
-                log_fn("Wi-Fi enable step failed: {0}".format(exc))
+                log_fn("Wi-Fi启用失败: {0}".format(exc))
     if _enable_wifi_software_radio(log_fn=log_fn):
         any_success = True
     return any_success
@@ -1498,20 +1498,13 @@ def check_wifi_and_warn(campus_ssid, log_fn=None):
     """Check if current WiFi matches campus SSID. Returns True if OK."""
     current = get_current_wifi_ssid()
     if not current:
-        if log_fn:
-            log_fn("Current Wi-Fi SSID: <not connected or not Wi-Fi>")
         return True  # can't determine, don't block
     if not campus_ssid:
-        if log_fn:
-            log_fn("Current Wi-Fi SSID: {0} (no campus SSID configured)".format(current))
         return True
     if current.lower() == campus_ssid.lower():
-        if log_fn:
-            log_fn("Wi-Fi SSID matches campus: {0}".format(current))
         return True
     if log_fn:
-        log_fn("WARNING: Current Wi-Fi SSID '{0}' != campus SSID '{1}'. Portal may be unreachable.".format(
-            current, campus_ssid))
+        log_fn("Wi-Fi不匹配: 当前'{0}'，校园网'{1}'".format(current, campus_ssid))
     return False
 
 
@@ -1771,15 +1764,15 @@ def discover_portal_base(configured_portal_base, timeout=3, log_fn=None):
 
     # 1. Try configured portal
     if _test_portal_candidate(configured, timeout=timeout):
-        _log("Portal confirmed: {0}".format(configured))
+        _log("portal确认: {0}".format(configured))
         return configured
 
-    _log("Portal {0} not reachable, trying candidates...".format(configured))
+    _log("{0}不可达，搜索其他portal...".format(configured))
 
     # 2. Try DEFAULT_PORTAL if different from configured
     default = DEFAULT_PORTAL.rstrip("/")
     if default != configured and _test_portal_candidate(default, timeout=timeout):
-        _log("Portal confirmed via default: {0}".format(default))
+        _log("portal确认(默认): {0}".format(default))
         return default
 
     # 3. Try gateway subnet (local, no internet needed)
@@ -1789,7 +1782,7 @@ def discover_portal_base(configured_portal_base, timeout=3, log_fn=None):
             if candidate.rstrip("/") in (configured, default):
                 continue
             if _test_portal_candidate(candidate, timeout=timeout):
-                _log("Discovered portal via gateway subnet: {0}".format(candidate))
+                _log("发现portal(网关子网): {0}".format(candidate))
                 return candidate
 
     # 4. NCSI redirects (requires some network access, may fail without internet)
@@ -1805,13 +1798,13 @@ def discover_portal_base(configured_portal_base, timeout=3, log_fn=None):
                 candidate = _extract_portal_from_url(location)
                 if candidate and candidate.rstrip("/") not in (configured, default):
                     if _test_portal_candidate(candidate, timeout=timeout):
-                        _log("Discovered portal via redirect: {0}".format(candidate))
+                        _log("发现portal(重定向): {0}".format(candidate))
                         return candidate
         except Exception:
             continue
 
     # No verified portal found - return configured as unverified fallback
-    _log("No verified portal found. Returning configured portal (unverified): {0}".format(configured))
+    _log("未找到可用portal，使用配置地址: {0}".format(configured))
     return configured
 
 
@@ -2114,12 +2107,12 @@ def wait_for_portal_ready(portal_base, timeout_seconds=60, interval=5, log_fn=No
         if status["state"] in ("online", "offline"):
             status["attempts"] = attempt
             _cache_campus_route(portal_base)
+            elapsed = int(time.time() + timeout_seconds - deadline)
             if log_fn:
-                log_fn("Portal reachable after {0}s ({1} attempts) via {2}.".format(
-                    int(attempt * interval), attempt, status.get("layer", "?")))
+                log_fn("portal恢复可达({0}秒, {1}次尝试)".format(elapsed, attempt))
             return status
         if log_fn and attempt == 1:
-            log_fn("Waiting for portal to become reachable (timeout={0}s)...".format(timeout_seconds))
+            log_fn("等待portal恢复(最多{0}秒)...".format(timeout_seconds))
         if not reconnect_requested and status["state"] == "network_not_ready":
             reconnect_campus_wifi(campus_ssid, log_fn=log_fn)
             reconnect_requested = True
@@ -2129,7 +2122,7 @@ def wait_for_portal_ready(portal_base, timeout_seconds=60, interval=5, log_fn=No
             break
         time.sleep(sleep_time)
     if log_fn:
-        log_fn("Portal not reachable after {0}s timeout.".format(timeout_seconds))
+        log_fn("portal恢复超时({0}秒)".format(timeout_seconds))
     return None
 
 
@@ -2326,7 +2319,7 @@ def run_tray_mode(args):
             log_fn=lambda msg: write_log(args.log, msg),
         )
         if discovered.rstrip("/") != config["portal_base"].rstrip("/"):
-            write_log(args.log, "Auto-discovered portal: {0}".format(discovered))
+            write_log(args.log, "发现portal: {0}".format(discovered))
             config["portal_base"] = discovered
         failure_state = {"consecutive_failures": 0}
         while True:
@@ -2448,18 +2441,16 @@ def main():
                 test_url, timeout=5, purpose="diagnose",
                 allow_proxy_bypass=args.allow_temporary_proxy_bypass,
             )
-            write_log(args.log, "Resilient fetch SUCCESS via layer: {0}".format(layer))
+            write_log(args.log, "多层传输成功: {0}".format(layer))
             _cache_campus_route(args.portal_base)
         except OSError as exc:
-            write_log(args.log, "Resilient fetch FAILED: {0}".format(exc))
+            write_log(args.log, "多层传输失败: {0}".format(exc))
         # Portal auto-discovery
-        write_log(args.log, "--- Portal Auto-Discovery ---")
         discovered = discover_portal_base(
             args.portal_base, timeout=3,
             log_fn=lambda msg: write_log(args.log, msg),
         )
-        write_log(args.log, "Discovered portal: {0}".format(discovered))
-        write_log(args.log, "--- End Discovery ---")
+        write_log(args.log, "发现portal: {0}".format(discovered))
         return 0
 
     if args.once:
@@ -2481,7 +2472,7 @@ def main():
             log_fn=lambda msg: write_log(args.log, msg),
         )
         if discovered.rstrip("/") != config["portal_base"].rstrip("/"):
-            write_log(args.log, "Auto-discovered portal: {0}".format(discovered))
+            write_log(args.log, "发现portal: {0}".format(discovered))
             config["portal_base"] = discovered
         # Wait for portal to become ready (--once can wait longer)
         status = wait_for_portal_ready(
@@ -2499,7 +2490,7 @@ def main():
             write_log(args.log, "已连接，无需登录")
             return 0
         # Portal reachable and offline - attempt login
-        write_log(args.log, "Campus portal is reachable and account is offline. Trying login...")
+        write_log(args.log, "portal可达，账号未认证，尝试登录...")
         return 0 if login_once(config, args) else 1
 
     if not args.tray and not args.init and not args.once and not args.check:
@@ -2521,30 +2512,29 @@ def main():
     if requested_interval != args.interval:
         write_log(
             args.log,
-            "Interval adjusted from {0}s to {1}s.".format(requested_interval, args.interval),
+            "间隔调整: {0}秒 -> {1}秒".format(requested_interval, args.interval),
         )
-    write_log(args.log, "Campus portal monitor started.Interval={0}s.".format(args.interval))
+    write_log(args.log, "已启动，监控间隔={0}s".format(args.interval))
     while True:
         try:
             login_once(config, args)
         except Exception as exc:
-            write_log(args.log, "Login exception:{0}, retrying in {1}s.".format(exc, args.interval))
+            write_log(args.log, "登录异常（{0}），{1}秒后重试".format(exc, args.interval))
         wall_start = time.time()
         time.sleep(args.interval)
         wall_elapsed = time.time() - wall_start
         if wall_elapsed > args.interval * 2:
-            write_log(args.log, "System wake detected (slept {0}s). Checking immediately.".format(
-                int(wall_elapsed)))
+            write_log(args.log, "唤醒检测，立即检查网络")
 
 
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except KeyboardInterrupt:
-        write_log(DEFAULT_LOG, "Stopped by user.")
+        write_log(DEFAULT_LOG, "用户停止")
         raise SystemExit(130)
     except Exception as exc:
-        write_log(DEFAULT_LOG, "Fatal error:{0}: {1}".format(type(exc).__name__, exc))
+        write_log(DEFAULT_LOG, "致命错误: {0}: {1}".format(type(exc).__name__, exc))
         if getattr(sys, "frozen", False):
             time.sleep(15)
         raise SystemExit(1)
