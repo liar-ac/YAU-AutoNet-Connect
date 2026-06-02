@@ -2331,7 +2331,16 @@ def run_tray_mode(args):
                 login_once(config, args, failure_state=failure_state)
             except Exception as exc:
                 write_log(args.log, "登录异常（{0}），{1}秒后重试".format(exc, args.interval))
+            # Sleep with wake-from-sleep detection:
+            # If wall-clock jumps more than interval*2, system just woke from sleep.
+            # In that case, skip remaining sleep and check immediately.
+            sleep_start = time.monotonic()
+            wall_start = time.time()
             time.sleep(args.interval)
+            wall_elapsed = time.time() - wall_start
+            if wall_elapsed > args.interval * 2:
+                write_log(args.log, "System wake detected (slept {0}s). Checking immediately.".format(
+                    int(wall_elapsed)))
 
     login_thread = threading.Thread(target=login_loop, daemon=True)
     login_thread.start()
@@ -2518,7 +2527,12 @@ def main():
             login_once(config, args)
         except Exception as exc:
             write_log(args.log, "Login exception:{0}, retrying in {1}s.".format(exc, args.interval))
+        wall_start = time.time()
         time.sleep(args.interval)
+        wall_elapsed = time.time() - wall_start
+        if wall_elapsed > args.interval * 2:
+            write_log(args.log, "System wake detected (slept {0}s). Checking immediately.".format(
+                int(wall_elapsed)))
 
 
 if __name__ == "__main__":
