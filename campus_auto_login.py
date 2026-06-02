@@ -1032,25 +1032,14 @@ def login_once(config, args, failure_state=None):
         # Immediately request Wi-Fi reconnect (always try, even without configured SSID)
         campus_ssid = getattr(args, "campus_ssid", "") or config.get("campus_ssid", "")
         reconnect_campus_wifi(campus_ssid, log_fn=lambda msg: write_log(args.log, msg))
-        # Try portal discovery on first failure (rate-limited to every 5 min)
-        global _last_discovery_time
-        if count == 1 and (time.time() - _last_discovery_time > _DISCOVERY_COOLDOWN):
-            _last_discovery_time = time.time()
-            discovered = discover_portal_base(
-                config["portal_base"], timeout=3,
-                log_fn=lambda msg: write_log(args.log, msg),
-            )
-            if discovered.rstrip("/") != config["portal_base"].rstrip("/"):
-                write_log(args.log, "切换到发现的portal: {0}".format(discovered))
-                config["portal_base"] = discovered
-        # Quick retry after 5s (Wi-Fi reconnect takes ~10-20s, but may be faster)
+        # Wait for Wi-Fi to reconnect, then quick retry
         time.sleep(5)
         retry = get_status(config["portal_base"], allow_proxy_bypass=allow_bypass)
         if retry["state"] in ("online", "offline"):
             write_log(args.log, "快速恢复成功")
             status = retry
         else:
-            # Still down, let the normal 30s loop handle further recovery
+            # Still down, let the normal 10s loop handle further recovery
             return False
 
     if status["state"] == "portal_unreachable":
