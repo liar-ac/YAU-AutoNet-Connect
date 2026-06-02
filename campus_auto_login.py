@@ -1029,10 +1029,9 @@ def login_once(config, args, failure_state=None):
             count = 1
 
         write_log(args.log, "网络中断，恢复中...")
-        # Immediately request Wi-Fi reconnect
+        # Immediately request Wi-Fi reconnect (always try, even without configured SSID)
         campus_ssid = getattr(args, "campus_ssid", "") or config.get("campus_ssid", "")
-        if campus_ssid:
-            reconnect_campus_wifi(campus_ssid, log_fn=lambda msg: write_log(args.log, msg))
+        reconnect_campus_wifi(campus_ssid, log_fn=lambda msg: write_log(args.log, msg))
         # Try portal discovery on first failure (rate-limited to every 5 min)
         global _last_discovery_time
         if count == 1 and (time.time() - _last_discovery_time > _DISCOVERY_COOLDOWN):
