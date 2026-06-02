@@ -617,7 +617,7 @@ ROUTE_CACHE = SCRIPT_DIR / "campus_route_cache.json"
 MIN_INTERVAL_SECONDS = 5
 MAX_INTERVAL_SECONDS = 30
 
-_log_queue = queue.Queue()
+_log_queue = queue.Queue(maxsize=500)  # bounded to prevent unbounded growth if log window never opened
 _log_lock = threading.Lock()
 
 
@@ -972,6 +972,10 @@ def get_status(portal_base, allow_proxy_bypass=False):
         }
 
 
+_last_discovery_time = 0
+_DISCOVERY_COOLDOWN = 300  # 5 minutes between portal discoveries
+
+
 def login_once(config, args, failure_state=None):
     """Attempt one login cycle. Returns True if online after this call.
     failure_state: dict to track consecutive failures across calls (for tray loop).
@@ -992,8 +996,10 @@ def login_once(config, args, failure_state=None):
         campus_ssid = getattr(args, "campus_ssid", "") or config.get("campus_ssid", "")
         if campus_ssid:
             reconnect_campus_wifi(campus_ssid, log_fn=lambda msg: write_log(args.log, msg))
-        # Try portal discovery on first failure
-        if count == 1:
+        # Try portal discovery on first failure (rate-limited to every 5 min)
+        global _last_discovery_time
+        if count == 1 and (time.time() - _last_discovery_time > _DISCOVERY_COOLDOWN):
+            _last_discovery_time = time.time()
             discovered = discover_portal_base(
                 config["portal_base"], timeout=3,
                 log_fn=lambda msg: write_log(args.log, msg),
@@ -1015,11 +1021,15 @@ def login_once(config, args, failure_state=None):
         write_log(args.log, "portal访问异常，尝试发现其他地址...")
         if failure_state is not None:
             failure_state["consecutive_failures"] = failure_state.get("consecutive_failures", 0) + 1
-        # Try portal auto-discovery
-        discovered = discover_portal_base(
-            config["portal_base"], timeout=3,
-            log_fn=lambda msg: write_log(args.log, msg),
-        )
+        # Try portal auto-discovery (rate-limited)
+        if time.time() - _last_discovery_time > _DISCOVERY_COOLDOWN:
+            _last_discovery_time = time.time()
+            discovered = discover_portal_base(
+                config["portal_base"], timeout=3,
+                log_fn=lambda msg: write_log(args.log, msg),
+            )
+        else:
+            discovered = config["portal_base"]
         if discovered.rstrip("/") != config["portal_base"].rstrip("/"):
             write_log(args.log, "切换到发现的portal: {0}".format(discovered))
             config["portal_base"] = discovered
@@ -2327,7 +2337,6 @@ def run_tray_mode(args):
             # Sleep with wake-from-sleep detection:
             # If wall-clock jumps more than interval*2, system just woke from sleep.
             # In that case, skip remaining sleep and check immediately.
-            sleep_start = time.monotonic()
             wall_start = time.time()
             time.sleep(args.interval)
             wall_elapsed = time.time() - wall_start
