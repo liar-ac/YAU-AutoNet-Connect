@@ -1625,11 +1625,27 @@ def network_ready(portal_host="10.200.84.3", portal_port=80, log_fn=None):
     return ok
 
 
+def _has_physical_adapter():
+    """Quick check: does at least one non-virtual adapter have an IP?"""
+    adapters = _get_physical_adapter_ips()
+    return any(not virt for _, _, _, _, virt in adapters)
+
+
 def wait_for_network_ready(portal_host="10.200.84.3", portal_port=80,
                            timeout_seconds=120, check_interval=3,
                            stable_seconds=5, log_fn=None):
     """Wait until network_ready() returns True for consecutive stable_seconds.
+    Extends timeout automatically if system recently booted and no adapter detected.
     Returns True if stable, False if timeout."""
+    # Auto-extend timeout for cold boot scenarios
+    boot_elapsed = _seconds_since_boot()
+    if 0 < boot_elapsed < 300 and not _has_physical_adapter():
+        timeout_seconds = max(timeout_seconds, 180)
+        check_interval = max(check_interval, 10)
+        if log_fn:
+            log_fn("[NetworkReady] Cold boot detected ({0}s ago). Extended timeout to {1}s, interval {2}s.".format(
+                boot_elapsed, timeout_seconds, check_interval))
+
     deadline = time.time() + timeout_seconds
     consecutive_ok = 0
     first_pass = True
