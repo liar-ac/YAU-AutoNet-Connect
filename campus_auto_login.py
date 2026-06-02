@@ -989,6 +989,11 @@ def login_once(config, args, failure_state=None):
 
         if count <= 1:
             write_log(args.log, "Portal temporarily unreachable, will retry next cycle.")
+            # Immediately request Wi-Fi reconnect (non-blocking) so it's in progress
+            # during the 30s wait, saving one full cycle.
+            campus_ssid = getattr(args, "campus_ssid", "") or config.get("campus_ssid", "")
+            if campus_ssid:
+                reconnect_campus_wifi(campus_ssid, log_fn=lambda msg: write_log(args.log, msg))
             return False
         if count == 2:
             write_log(args.log, "Portal still unreachable ({0} consecutive). Running auto-discovery...".format(count))
