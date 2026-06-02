@@ -987,13 +987,13 @@ def login_once(config, args, failure_state=None):
         else:
             count = 1
 
-        if count <= 1:
-            write_log(args.log, "网络中断，等待恢复...")
-            campus_ssid = getattr(args, "campus_ssid", "") or config.get("campus_ssid", "")
-            if campus_ssid:
-                reconnect_campus_wifi(campus_ssid, log_fn=lambda msg: write_log(args.log, msg))
-            return False
-        if count == 2:
+        write_log(args.log, "网络中断，恢复中...")
+        # Immediately request Wi-Fi reconnect
+        campus_ssid = getattr(args, "campus_ssid", "") or config.get("campus_ssid", "")
+        if campus_ssid:
+            reconnect_campus_wifi(campus_ssid, log_fn=lambda msg: write_log(args.log, msg))
+        # Try portal discovery on first failure
+        if count == 1:
             discovered = discover_portal_base(
                 config["portal_base"], timeout=3,
                 log_fn=lambda msg: write_log(args.log, msg),
@@ -1001,17 +1001,15 @@ def login_once(config, args, failure_state=None):
             if discovered.rstrip("/") != config["portal_base"].rstrip("/"):
                 write_log(args.log, "切换到发现的portal: {0}".format(discovered))
                 config["portal_base"] = discovered
-        write_log(args.log, "等待网络恢复(最多75秒)...")
-        recovered = wait_for_portal_ready(
-            config["portal_base"], timeout_seconds=75, interval=5,
-            log_fn=lambda msg: write_log(args.log, msg),
-            allow_proxy_bypass=allow_bypass,
-            campus_ssid=(getattr(args, "campus_ssid", "") or config.get("campus_ssid", "")),
-        )
-        if recovered is None:
-            maybe_diagnose(config["portal_base"], args.log)
+        # Quick retry after 5s (Wi-Fi reconnect takes ~10-20s, but may be faster)
+        time.sleep(5)
+        retry = get_status(config["portal_base"], allow_proxy_bypass=allow_bypass)
+        if retry["state"] in ("online", "offline"):
+            write_log(args.log, "快速恢复成功")
+            status = retry
+        else:
+            # Still down, let the normal 30s loop handle further recovery
             return False
-        status = recovered
 
     if status["state"] == "portal_unreachable":
         write_log(args.log, "portal访问异常，尝试发现其他地址...")
@@ -1520,7 +1518,7 @@ def normalize_interval(seconds):
 # Boot grace period & network readiness gate
 # ---------------------------------------------------------------------------
 
-BOOT_GRACE_SECONDS = 90  # wait this long after system boot before probing
+BOOT_GRACE_SECONDS = 30  # brief wait after boot; wait_for_network_ready handles the rest
 _network_ready_logged = False
 
 
@@ -1618,7 +1616,6 @@ def wait_for_network_ready(portal_host="10.200.84.3", portal_port=80,
     boot_elapsed = _seconds_since_boot()
     if 0 < boot_elapsed < 300 and not _has_physical_adapter():
         timeout_seconds = max(timeout_seconds, 180)
-        check_interval = max(check_interval, 10)
         if log_fn:
             log_fn("开机初始化，等待网络就绪(最多{0}秒)...".format(timeout_seconds))
 
