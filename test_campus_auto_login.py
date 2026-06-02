@@ -531,7 +531,7 @@ class TestLoginOnceNetworkNotReady(unittest.TestCase):
         config = {"portal_base": "http://10.200.84.3"}
         self.assertTrue(login_once(config, args, failure_state={"consecutive_failures": 1}))
         messages = [call_args[0][1] for call_args in mock_log.call_args_list]
-        self.assertIn("Portal reached after 1 attempts.", messages)
+        self.assertTrue(any("已连接" in m for m in messages))
 
 
 class TestWaitForPortalReady(unittest.TestCase):

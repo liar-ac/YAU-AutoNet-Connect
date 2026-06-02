@@ -988,25 +988,20 @@ def login_once(config, args, failure_state=None):
             count = 1
 
         if count <= 1:
-            write_log(args.log, "Portal temporarily unreachable, will retry next cycle.")
-            # Immediately request Wi-Fi reconnect (non-blocking) so it's in progress
-            # during the 30s wait, saving one full cycle.
+            write_log(args.log, "网络中断，等待恢复...")
             campus_ssid = getattr(args, "campus_ssid", "") or config.get("campus_ssid", "")
             if campus_ssid:
                 reconnect_campus_wifi(campus_ssid, log_fn=lambda msg: write_log(args.log, msg))
             return False
         if count == 2:
-            write_log(args.log, "Portal still unreachable ({0} consecutive). Running auto-discovery...".format(count))
             discovered = discover_portal_base(
                 config["portal_base"], timeout=3,
                 log_fn=lambda msg: write_log(args.log, msg),
             )
             if discovered.rstrip("/") != config["portal_base"].rstrip("/"):
-                write_log(args.log, "Switching to discovered portal: {0}".format(discovered))
+                write_log(args.log, "切换到发现的portal: {0}".format(discovered))
                 config["portal_base"] = discovered
-        if count >= 3:
-            write_log(args.log, "Portal unreachable ({0} consecutive). Route exists but TCP failed. Waiting for network.".format(count))
-        write_log(args.log, "Waiting up to 75s for portal route recovery...")
+        write_log(args.log, "等待网络恢复(最多75秒)...")
         recovered = wait_for_portal_ready(
             config["portal_base"], timeout_seconds=75, interval=5,
             log_fn=lambda msg: write_log(args.log, msg),
@@ -1019,8 +1014,7 @@ def login_once(config, args, failure_state=None):
         status = recovered
 
     if status["state"] == "portal_unreachable":
-        # HTTP-level error, not transient socket
-        write_log(args.log, "Portal HTTP error: {0}".format(status["error"]))
+        write_log(args.log, "portal访问异常，尝试发现其他地址...")
         if failure_state is not None:
             failure_state["consecutive_failures"] = failure_state.get("consecutive_failures", 0) + 1
         # Try portal auto-discovery
@@ -1042,13 +1036,10 @@ def login_once(config, args, failure_state=None):
         failure_state["consecutive_failures"] = 0
     _cache_campus_route(config["portal_base"])
 
-    if status.get("layer"):
-        write_log(args.log, "Portal reached via {0}.".format(status["layer"]))
-        write_log(args.log, "Portal reached after {0} attempts.".format(status.get("attempts", 1)))
     if status["online"]:
-        write_log(args.log, "Already online.No login needed.")
+        write_log(args.log, "已连接 | {0}".format(status.get("layer", "direct")))
         return True
-    write_log(args.log, "Offline from portal status.Login will be attempted.")
+    write_log(args.log, "portal可达，账号未认证，尝试登录...")
     if args.check:
         return False
 
@@ -1087,13 +1078,12 @@ def login_once(config, args, failure_state=None):
             )
             result_value = result.get("result")
             if result_value == 1 or str(result_value).lower() in {"1", "ok"}:
-                write_log(args.log, "Login API returned success.")
                 time.sleep(2)
                 after = get_status(config["portal_base"], allow_proxy_bypass=allow_bypass)
                 if after["online"]:
-                    write_log(args.log, "Status recheck confirmed online.")
+                    write_log(args.log, "登录成功，已上线")
                     return True
-                write_log(args.log, "Status recheck still offline after login.")
+                write_log(args.log, "登录请求成功但复查未上线")
             else:
                 message = (
                     result.get("msg")
@@ -1103,7 +1093,7 @@ def login_once(config, args, failure_state=None):
                     or result.get("result")
                     or "unknown error"
                 )
-                write_log(args.log, "Login failed:{0}".format(message))
+                write_log(args.log, "登录失败: {0}".format(message))
             if index < args.max_attempts:
                 time.sleep(args.retry_seconds)
         return False
@@ -1478,29 +1468,29 @@ def reconnect_campus_wifi(campus_ssid="", log_fn=None):
         return False
     try:
         if log_fn:
-            log_fn('Attempting Wi-Fi reconnect: {0}'.format(ssid))
+            log_fn('正在重连Wi-Fi: {0}'.format(ssid))
         result = _run_netsh_wifi_connect(ssid)
         if result.returncode == 0:
             if log_fn:
-                log_fn('Wi-Fi reconnect requested for SSID: {0}'.format(ssid))
+                log_fn('Wi-Fi重连已请求: {0}'.format(ssid))
             return True
         err = _decode_command_output(result.stderr or result.stdout).strip()
         if _is_wifi_power_off_error(err):
             if log_fn:
-                log_fn("Wi-Fi interface appears powered off. Trying to enable it before reconnect.")
+                log_fn("Wi-Fi接口已关闭，尝试启用...")
             ensure_wifi_interface_enabled(log_fn=log_fn)
             time.sleep(3)
             result = _run_netsh_wifi_connect(ssid)
             if result.returncode == 0:
                 if log_fn:
-                    log_fn('Wi-Fi reconnect requested for SSID: {0}'.format(ssid))
+                    log_fn('Wi-Fi重连已请求: {0}'.format(ssid))
                 return True
             err = _decode_command_output(result.stderr or result.stdout).strip()
         if log_fn:
-            log_fn('Wi-Fi reconnect request failed: {0}'.format(err or result.returncode))
+            log_fn('Wi-Fi重连失败: {0}'.format(err or result.returncode))
     except Exception as exc:
         if log_fn:
-            log_fn('Wi-Fi reconnect request failed: {0}'.format(exc))
+            log_fn('Wi-Fi重连失败: {0}'.format(exc))
     return False
 
 
@@ -1574,11 +1564,8 @@ def boot_grace_wait(log_fn=None):
         return False
     remaining = BOOT_GRACE_SECONDS - elapsed
     if log_fn:
-        log_fn("[BootGuard] System booted {0}s ago. Waiting {1}s for network stabilization...".format(
-            elapsed, remaining))
+        log_fn("开机初始化中，等待{0}秒网络就绪...".format(remaining))
     time.sleep(remaining)
-    if log_fn:
-        log_fn("[BootGuard] Boot grace period ended. Resuming.")
     return True
 
 
@@ -1594,25 +1581,22 @@ def network_ready(portal_host="10.200.84.3", portal_port=80, log_fn=None):
     # Info: adapter status (non-blocking, for diagnostics only)
     adapters = _get_physical_adapter_ips()
     physical = [(ip, ifidx, name, desc) for ip, ifidx, name, desc, virt in adapters if not virt]
-    if physical:
-        for ip, ifidx, name, desc in physical[:2]:
-            details.append("[NetworkReady] Adapter: {0} ({1}) IPv4={2}".format(name, desc, ip))
-    else:
-        details.append("[NetworkReady] No physical adapter detected (may be virtual/TUN environment)")
+    if not physical:
+        details.append("等待物理网卡就绪...")
 
     # Info: default gateway (non-blocking)
     gw = _get_default_gateway()
-    details.append("[NetworkReady] Default gateway: {0}".format(gw or "unknown"))
+    if gw:
+        details.append("网关: {0}".format(gw))
 
     # PRIMARY CHECK: TCP connect to portal
     try:
         s = socket.create_connection((portal_host, portal_port), timeout=3)
         s.close()
-        details.append("[NetworkReady] Portal TCP {0}:{1}: reachable".format(portal_host, portal_port))
+        details.append("portal TCP可达")
         ok = True
     except OSError as exc:
-        details.append("[NetworkReady] Portal TCP {0}:{1}: not reachable - {2}".format(
-            portal_host, portal_port, exc))
+        details.append("portal TCP不可达: {0}".format(exc))
         ok = False
 
     # Log on first call or state change
@@ -1643,8 +1627,7 @@ def wait_for_network_ready(portal_host="10.200.84.3", portal_port=80,
         timeout_seconds = max(timeout_seconds, 180)
         check_interval = max(check_interval, 10)
         if log_fn:
-            log_fn("[NetworkReady] Cold boot detected ({0}s ago). Extended timeout to {1}s, interval {2}s.".format(
-                boot_elapsed, timeout_seconds, check_interval))
+            log_fn("开机初始化，等待网络就绪(最多{0}秒)...".format(timeout_seconds))
 
     deadline = time.time() + timeout_seconds
     consecutive_ok = 0
@@ -1655,7 +1638,7 @@ def wait_for_network_ready(portal_host="10.200.84.3", portal_port=80,
             consecutive_ok += check_interval
             if consecutive_ok >= stable_seconds:
                 if log_fn:
-                    log_fn("[NetworkReady] Network stable for {0}s. Ready to probe portal.".format(consecutive_ok))
+                    log_fn("网络就绪")
                 return True
         else:
             consecutive_ok = 0
@@ -1664,7 +1647,7 @@ def wait_for_network_ready(portal_host="10.200.84.3", portal_port=80,
         time.sleep(min(check_interval, max(1, remaining)))
 
     if log_fn:
-        log_fn("[NetworkReady] Timeout after {0}s. Network not stable.".format(timeout_seconds))
+        log_fn("网络就绪等待超时({0}秒)".format(timeout_seconds))
     return False
 
 
@@ -2330,14 +2313,13 @@ def run_tray_mode(args):
             return
         if args.portal_base != DEFAULT_PORTAL:
             config["portal_base"] = args.portal_base.rstrip("/")
-        write_log(args.log, "校园网自动登录已在后台启动，监控间隔={0}s.".format(args.interval))
-        write_log(args.log, "Portal requests use raw http.client direct transport to bypass system proxy.")
+        write_log(args.log, "已启动，监控间隔={0}s".format(args.interval))
         # Boot grace period: wait for network to stabilize after system startup
         boot_grace_wait(log_fn=lambda msg: write_log(args.log, msg))
         # Network ready gate: wait for physical adapter, route, and TCP before probing
         portal_host = parse.urlsplit(config["portal_base"]).hostname or "10.200.84.3"
         if not wait_for_network_ready(portal_host, log_fn=lambda msg: write_log(args.log, msg)):
-            write_log(args.log, "[BootGuard] Network not ready after grace period. Proceeding with normal retry loop.")
+            write_log(args.log, "网络未就绪，进入正常重试")
         # Portal auto-discovery at startup
         discovered = discover_portal_base(
             config["portal_base"], timeout=3,
@@ -2360,8 +2342,7 @@ def run_tray_mode(args):
             time.sleep(args.interval)
             wall_elapsed = time.time() - wall_start
             if wall_elapsed > args.interval * 2:
-                write_log(args.log, "System wake detected (slept {0}s). Checking immediately.".format(
-                    int(wall_elapsed)))
+                write_log(args.log, "唤醒检测，立即检查网络")
 
     login_thread = threading.Thread(target=login_loop, daemon=True)
     login_thread.start()
@@ -2445,7 +2426,7 @@ def main():
             except OSError as exc:
                 last_error = exc
                 if attempt == 1:
-                    write_log(args.log, "Portal not reachable yet. Waiting for campus route/Wi-Fi recovery up to 75s...")
+                    write_log(args.log, "等待网络恢复(最多75秒)...")
                     reconnect_campus_wifi(args.campus_ssid, log_fn=lambda msg: write_log(args.log, msg))
                 time.sleep(5)
         try:
@@ -2493,7 +2474,7 @@ def main():
         # Network ready gate
         portal_host = parse.urlsplit(config["portal_base"]).hostname or "10.200.84.3"
         if not wait_for_network_ready(portal_host, timeout_seconds=90, log_fn=lambda msg: write_log(args.log, msg)):
-            write_log(args.log, "[NetworkReady] Network not stable after 90s. Proceeding anyway.")
+            write_log(args.log, "网络就绪等待超时，继续尝试")
         # Portal auto-discovery for --once mode
         discovered = discover_portal_base(
             config["portal_base"], timeout=3,
@@ -2510,12 +2491,12 @@ def main():
             campus_ssid=campus_ssid,
         )
         if status is None:
-            write_log(args.log, "Portal not reachable after 60s. Campus network may not be connected.")
+            write_log(args.log, "portal不可达，校园网可能未连接")
             diagnose_portal_connectivity(config["portal_base"], log_fn=lambda msg: write_log(args.log, msg))
             log_portal_failure_matrix(config["portal_base"], log_fn=lambda msg: write_log(args.log, msg))
             return 1
         if status["online"]:
-            write_log(args.log, "Already online. No login needed.")
+            write_log(args.log, "已连接，无需登录")
             return 0
         # Portal reachable and offline - attempt login
         write_log(args.log, "Campus portal is reachable and account is offline. Trying login...")
