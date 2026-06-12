@@ -910,7 +910,7 @@ def init_config(args):
     else:
         result = _init_config_gui()
         if result is None:
-            return
+            return False
         username, password, suffix = result
 
     data = {
@@ -932,6 +932,7 @@ def init_config(args):
         root.withdraw()
         messagebox.showinfo("初始化完成", "配置已保存到:\n{0}\n\n双击 campus_auto_login.exe 即可使用。".format(args.config), parent=root)
         root.destroy()
+    return True
 
 
 def get_status(portal_base, allow_proxy_bypass=False):
@@ -2536,7 +2537,7 @@ def main():
 
     if args.init:
         init_result = init_config(args)
-        if init_result is None and not _has_console_stdin():
+        if init_result is False:
             # GUI init was cancelled - abort
             return 0
         if not args.once and not args.check and not args.tray:
