@@ -112,7 +112,6 @@ def fetch_text_with_retry(url, headers=None, timeout=10, retries=None):
             if not _is_socket_unreachable_error(exc) or attempt >= len(retries):
                 raise
             last_exc = exc
-    raise last_exc
 
 
 # ---------------------------------------------------------------------------
@@ -996,38 +995,48 @@ def login_once(config, args, failure_state=None):
 
     if status["state"] == "network_not_ready":
         # Socket-level failure - transient, likely Wi-Fi roaming or network transition
-        # Fast retry: try cached login params directly (skip status query)
+        # Fast retry: use cached account/IP params, re-derive password from config
         if _cached_login_params and _cached_login_params.get("portal_base") == config["portal_base"]:
             try:
                 cached = _cached_login_params
-                fast_params = [
-                    ("login_method", "1"),
-                    ("user_account", cached["account"]),
-                    ("user_password", cached["password"]),
-                    ("wlan_user_ip", cached["wlan_user_ip"]),
-                    ("wlan_user_ipv6", ""),
-                    ("wlan_user_mac", cached["wlan_user_mac"]),
-                    ("wlan_ac_ip", ""),
-                    ("wlan_ac_name", ""),
-                    ("jsVersion", "4.2.1"),
-                    ("terminal_type", cached["terminal_type"]),
-                    ("lang", "zh-cn"),
-                ]
-                result = invoke_url_jsonp(
-                    eportal_login_url(config["portal_base"]),
-                    fast_params, timeout=8,
-                    force_trailing_lang=True,
-                    portal_base=config["portal_base"],
-                    allow_proxy_bypass=allow_bypass,
-                )
-                if result.get("result") == 1 or str(result.get("result", "")).lower() in {"1", "ok"}:
-                    time.sleep(1)
-                    check = get_status(config["portal_base"], allow_proxy_bypass=allow_bypass)
-                    if check["online"]:
-                        write_log(args.log, "缓存参数快速登录成功")
-                        return True
+                # Re-derive password from config (not from cache, for security)
+                if config.get("password_dpapi"):
+                    fast_password = dpapi_unprotect(config["password_dpapi"])
+                elif config.get("password_ps_hex"):
+                    fast_password = dpapi_unprotect_powershell_secure_string(config["password_ps_hex"])
+                else:
+                    fast_password = None
+                if fast_password:
+                    fast_params = [
+                        ("login_method", "1"),
+                        ("user_account", cached["account"]),
+                        ("user_password", fast_password),
+                        ("wlan_user_ip", cached["wlan_user_ip"]),
+                        ("wlan_user_ipv6", ""),
+                        ("wlan_user_mac", cached["wlan_user_mac"]),
+                        ("wlan_ac_ip", ""),
+                        ("wlan_ac_name", ""),
+                        ("jsVersion", "4.2.1"),
+                        ("terminal_type", cached["terminal_type"]),
+                        ("lang", "zh-cn"),
+                    ]
+                    result = invoke_url_jsonp(
+                        eportal_login_url(config["portal_base"]),
+                        fast_params, timeout=8,
+                        force_trailing_lang=True,
+                        portal_base=config["portal_base"],
+                        allow_proxy_bypass=allow_bypass,
+                    )
+                    if result.get("result") == 1 or str(result.get("result", "")).lower() in {"1", "ok"}:
+                        time.sleep(1)
+                        check = get_status(config["portal_base"], allow_proxy_bypass=allow_bypass)
+                        if check["online"]:
+                            write_log(args.log, "缓存参数快速登录成功")
+                            return True
             except Exception:
                 pass  # fall through to normal recovery
+            finally:
+                fast_password = None
 
         if failure_state is not None:
             failure_state["consecutive_failures"] = failure_state.get("consecutive_failures", 0) + 1
@@ -1119,10 +1128,9 @@ def login_once(config, args, failure_state=None):
                 after = get_status(config["portal_base"], allow_proxy_bypass=allow_bypass)
                 if after["online"]:
                     write_log(args.log, "登录成功，已上线")
-                    # Cache login params for fast retry on next disconnection
+                    # Cache login params for fast retry on next disconnection (no password - re-derived from config)
                     _cached_login_params = {
                         "account": account,
-                        "password": password,
                         "wlan_user_ip": wlan_user_ip,
                         "wlan_user_mac": wlan_user_mac,
                         "terminal_type": terminal_type,
@@ -1145,8 +1153,6 @@ def login_once(config, args, failure_state=None):
         return False
     finally:
         password = None
-        if _cached_login_params is not None:
-            _cached_login_params["password"] = None
 
 
 def check_only(args):
