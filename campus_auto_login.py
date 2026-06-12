@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import atexit
 import base64
 import ctypes
 import getpass
@@ -22,7 +23,7 @@ from urllib import parse, request
 
 DEFAULT_PORTAL = "http://10.200.84.3"
 APP_NAME = "YAU-AutoNet-Connect"
-APP_VERSION = "1.0.7"
+APP_VERSION = "1.0.8"
 __version__ = APP_VERSION
 
 # Legacy urllib opener kept for backward compatibility; v1.0.4 core path uses http.client direct.
@@ -720,8 +721,11 @@ def write_log(log_path, message):
                 log_path.rename(old)
         except OSError:
             pass
-        with log_path.open("a", encoding="utf-8") as f:
-            f.write(line + "\n")
+        try:
+            with log_path.open("a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except OSError:
+            pass  # disk full, permissions, etc. - don't crash the monitoring loop
     try:
         _log_queue.put_nowait(line)
     except queue.Full:
@@ -948,7 +952,10 @@ def get_status(portal_base, allow_proxy_bypass=False):
             purpose="status", allow_proxy_bypass=allow_proxy_bypass,
         )
         data = jsonp_to_obj(content)
-        result_val = int(data.get("result", 0))
+        try:
+            result_val = int(data.get("result", 0))
+        except (TypeError, ValueError):
+            result_val = 0
         return {
             "state": "online" if result_val == 1 else "offline",
             "reachable": True,
@@ -983,7 +990,7 @@ def login_once(config, args, failure_state=None):
     """Attempt one login cycle. Returns True if online after this call.
     failure_state: dict to track consecutive failures across calls (for tray loop).
     """
-    global _cached_login_params
+    global _cached_login_params, _last_discovery_time
     allow_bypass = getattr(args, "allow_temporary_proxy_bypass", False)
     status = get_status(config["portal_base"], allow_proxy_bypass=allow_bypass)
 
@@ -1494,6 +1501,92 @@ def ensure_wifi_interface_enabled(log_fn=None):
     return any_success
 
 
+def disable_wifi_power_save(log_fn=None):
+    """Disable Wi-Fi adapter power saving to prevent disconnection during lock screen.
+    Uses PowerShell Set-NetAdapterPowerManagement to disable DeviceSleepOnDisconnect
+    and WakeOnMagicPacket. Also disables 'Allow the computer to turn off this device
+    to save power' via WMI.
+    Best-effort: returns True if any command succeeded."""
+    adapter_name = _get_wifi_adapter_name()
+    if not adapter_name:
+        return False
+    if log_fn:
+        log_fn("禁用Wi-Fi省电模式: {0}".format(adapter_name))
+    any_success = False
+    # Disable power management via Set-NetAdapterPowerManagement (Windows 8+)
+    ps_disable_pm = (
+        "$a = '{0}'; "
+        "try {{ "
+        "  $pm = Get-NetAdapterPowerManagement -Name $a -ErrorAction Stop; "
+        "  $pm.DeviceSleepOnDisconnect = 0; "
+        "  $pm.WakeOnMagicPacket = 1; "
+        "  $pm.WakeOnPattern = 1; "
+        "  Set-NetAdapterPowerManagement -InputObject $pm -ErrorAction SilentlyContinue; "
+        "  Write-Output 'PM_SET_OK' "
+        "}} catch {{ Write-Output 'PM_SET_SKIP' }}"
+    ).format(adapter_name.replace("'", "''"))
+    out = _run_powershell_hidden(ps_disable_pm, timeout=15).strip()
+    if "PM_SET_OK" in out:
+        any_success = True
+        if log_fn:
+            log_fn("Wi-Fi省电模式已禁用")
+    # Disable 'Allow the computer to turn off this device to save power' via WMI
+    ps_disable_wmi = (
+        "$a = '{0}'; "
+        "$nics = Get-WmiObject -Class MSPower_DeviceEnable -Namespace root\\wmi -ErrorAction SilentlyContinue; "
+        "if ($nics) {{ "
+        "  foreach ($nic in $nics) {{ "
+        "    if ($nic.InstanceName -match 'Wireless|Wi-Fi|802\\\\.11|WLAN') {{ "
+        "      $nic.Enable = $false; $nic.Put() | Out-Null; "
+        "      Write-Output 'WMI_SET_OK' "
+        "    }} "
+        "  }} "
+        "}}"
+    ).format(adapter_name.replace("'", "''"))
+    out2 = _run_powershell_hidden(ps_disable_wmi, timeout=15).strip()
+    if "WMI_SET_OK" in out2:
+        any_success = True
+    # Also disable via netsh (some adapters respond to this)
+    _run_cmd_hidden(
+        ["netsh", "wlan", "set", "autoconfig", "enabled=yes", "interface={0}".format(adapter_name)],
+        timeout=10,
+    )
+    return any_success
+
+
+# ---------------------------------------------------------------------------
+# System sleep prevention (SetThreadExecutionState)
+# ---------------------------------------------------------------------------
+
+_ES_CONTINUOUS = 0x80000000
+_ES_SYSTEM_REQUIRED = 0x00000001
+_ES_AWAYMODE_REQUIRED = 0x00000040
+_sleep_prevention_active = False
+
+
+def _prevent_system_sleep():
+    """Tell Windows to keep the system awake (prevent Modern Standby / connected standby).
+    Does NOT prevent screen from turning off. Reversible with _restore_system_sleep."""
+    global _sleep_prevention_active
+    try:
+        ctypes.windll.kernel32.SetThreadExecutionState(
+            _ES_CONTINUOUS | _ES_SYSTEM_REQUIRED | _ES_AWAYMODE_REQUIRED
+        )
+        _sleep_prevention_active = True
+    except Exception:
+        pass
+
+
+def _restore_system_sleep():
+    """Release the sleep prevention, allowing Windows to enter low-power states."""
+    global _sleep_prevention_active
+    try:
+        ctypes.windll.kernel32.SetThreadExecutionState(_ES_CONTINUOUS)
+        _sleep_prevention_active = False
+    except Exception:
+        pass
+
+
 def _run_netsh_wifi_connect(ssid):
     return subprocess.run(
         ["netsh", "wlan", "connect", "name={0}".format(ssid)],
@@ -1911,7 +2004,7 @@ def _get_portal_route_info(portal_host):
             src_ip = result["sourceIP"]
             ps_out = _run_powershell_hidden(
                 'Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.IPAddress -eq \'' + src_ip + '\'} | '
-                'Select-Object -First 1 | ForEach-Object { \'%s|%s|%s\' -f $_.InterfaceIndex, $_.InterfaceAlias, $_.IPAddress }',
+                'Select-Object -First 1 | ForEach-Object { \'{0}|{1}|{2}\' -f $_.InterfaceIndex, $_.InterfaceAlias, $_.IPAddress }',
                 timeout=10,
             ).strip()
             if ps_out and "|" in ps_out:
@@ -2175,8 +2268,11 @@ _CTRL_HANDLER = None  # prevent garbage collection
 
 
 def _console_ctrl_handler(ctrl_type):
-    """Ignore console close events so closing the console window doesn't kill the process."""
-    return True
+    """Ignore console close events so closing the console window doesn't kill the process.
+    Allow system logoff/shutdown to proceed normally."""
+    if ctrl_type == 2:  # CTRL_CLOSE_EVENT only
+        return True
+    return False
 
 
 def hide_console_window():
@@ -2261,6 +2357,7 @@ def show_log_window(icon=None, item=None):
 def quit_app(icon, item):
     """Stop the tray icon and exit the process."""
     icon.stop()
+    _restore_system_sleep()
     os._exit(0)
 
 
@@ -2336,10 +2433,36 @@ def run_tray_mode(args):
 
     hide_console_window()
 
+    # Prevent Windows from entering low-power sleep that disconnects Wi-Fi
+    _prevent_system_sleep()
+    atexit.register(_restore_system_sleep)
+
+    # Disable Wi-Fi adapter power saving to stay connected during lock screen
+    disable_wifi_power_save(log_fn=lambda msg: write_log(args.log, msg))
+
     tray_icon_img = create_tray_icon_image()
     icon = pystray.Icon("campus-auto-login", tray_icon_img, "校园网自动登录", _build_menu())
 
     def login_loop():
+        MAX_LOOP_RESTARTS = 10  # prevent infinite restart storms
+        restart_count = 0
+        while restart_count < MAX_LOOP_RESTARTS:
+            try:
+                _run_login_loop_inner(args)
+                # Normal return means config failure or early exit - treat as needing restart
+                restart_count += 1
+                write_log(args.log, "监控线程异常退出，{0}秒后重启（{1}/{2}）".format(
+                    min(30, 5 * restart_count), restart_count, MAX_LOOP_RESTARTS))
+                time.sleep(min(30, 5 * restart_count))
+            except Exception as exc:
+                restart_count += 1
+                write_log(args.log, "监控线程崩溃（{0}），{1}秒后重启（{2}/{3}）".format(
+                    exc, min(30, 5 * restart_count), restart_count, MAX_LOOP_RESTARTS))
+                time.sleep(min(30, 5 * restart_count))
+        write_log(args.log, "监控线程重启次数过多，停止监控")
+
+    def _run_login_loop_inner(args):
+        """Core login loop logic. Separated for crash recovery wrapper."""
         try:
             config = read_config(args.config)
         except Exception as exc:
@@ -2553,22 +2676,41 @@ def main():
     if args.portal_base != DEFAULT_PORTAL:
         config["portal_base"] = args.portal_base.rstrip("/")
 
+    # Disable Wi-Fi power saving for non-tray mode too
+    disable_wifi_power_save(log_fn=lambda msg: write_log(args.log, msg))
+
     if requested_interval != args.interval:
         write_log(
             args.log,
             "间隔调整: {0}秒 -> {1}秒".format(requested_interval, args.interval),
         )
     write_log(args.log, "已启动，监控间隔={0}s".format(args.interval))
-    while True:
+    failure_state = {"consecutive_failures": 0}
+    FAST_INTERVAL = 10
+    MAX_LOOP_RESTARTS = 10
+    restart_count = 0
+    while restart_count < MAX_LOOP_RESTARTS:
         try:
-            login_once(config, args)
+            while True:
+                try:
+                    login_once(config, args, failure_state=failure_state)
+                except Exception as exc:
+                    write_log(args.log, "登录异常（{0}），{1}秒后重试".format(exc, args.interval))
+                if failure_state["consecutive_failures"] > 0:
+                    sleep_time = FAST_INTERVAL
+                else:
+                    sleep_time = args.interval
+                wall_start = time.time()
+                time.sleep(sleep_time)
+                wall_elapsed = time.time() - wall_start
+                if wall_elapsed > sleep_time * 2:
+                    write_log(args.log, "唤醒检测，立即检查网络")
         except Exception as exc:
-            write_log(args.log, "登录异常（{0}），{1}秒后重试".format(exc, args.interval))
-        wall_start = time.time()
-        time.sleep(args.interval)
-        wall_elapsed = time.time() - wall_start
-        if wall_elapsed > args.interval * 2:
-            write_log(args.log, "唤醒检测，立即检查网络")
+            restart_count += 1
+            write_log(args.log, "监控循环崩溃（{0}），{1}秒后重启（{2}/{3}）".format(
+                exc, min(30, 5 * restart_count), restart_count, MAX_LOOP_RESTARTS))
+            time.sleep(min(30, 5 * restart_count))
+    write_log(args.log, "监控循环重启次数过多，停止")
 
 
 if __name__ == "__main__":

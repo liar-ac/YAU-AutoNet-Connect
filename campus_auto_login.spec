@@ -24,7 +24,7 @@ _EXCLUDES = [
     # standard library we never touch
     'unittest', 'pydoc', 'doctest',
     'tkinter.ttk', 'tkinter.filedialog',
-    'tkinter.colorchooser', 'tkinter.commondialog',
+    'tkinter.colorchooser',
     'tkinter.font',
     'logging.config', 'logging.handlers',
     'distutils', 'setuptools', 'pkg_resources',
@@ -36,7 +36,7 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[],
-    hiddenimports=['pystray', 'pystray._win32', 'PIL', 'PIL.Image', 'PIL.ImageDraw', 'tkinter', 'tkinter.scrolledtext', 'tkinter.simpledialog', 'tkinter.messagebox'],
+    hiddenimports=['pystray', 'pystray._win32', 'PIL', 'PIL.Image', 'PIL.ImageDraw', 'tkinter', 'tkinter.scrolledtext', 'tkinter.simpledialog', 'tkinter.messagebox', 'tempfile'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

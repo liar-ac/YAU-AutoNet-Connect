@@ -85,6 +85,15 @@ class TestNormalizeInterval(unittest.TestCase):
     def test_normal(self):
         self.assertEqual(normalize_interval(15), 15)
 
+    def test_exact_min_boundary(self):
+        self.assertEqual(normalize_interval(5), 5)
+
+    def test_exact_max_boundary(self):
+        self.assertEqual(normalize_interval(30), 30)
+
+    def test_just_below_min(self):
+        self.assertEqual(normalize_interval(4), 5)
+
 
 class TestEportalLoginUrl(unittest.TestCase):
     def test_default(self):
@@ -268,10 +277,9 @@ class TestInvokeJsonpUsesResilientFetch(unittest.TestCase):
             [],
             portal_base="http://10.200.100.1",
         )
-        headers = mock_fetch.call_args[0][1] if len(mock_fetch.call_args[0]) > 1 else mock_fetch.call_args[1].get("headers", {})
-        # Check that Referer is in the headers passed to resilient fetch
         call_kwargs = mock_fetch.call_args[1]
         self.assertIn("headers", call_kwargs)
+        self.assertEqual(call_kwargs["headers"]["Referer"], "http://10.200.100.1/")
 
 
 class TestDiagnosePortalConnectivity(unittest.TestCase):

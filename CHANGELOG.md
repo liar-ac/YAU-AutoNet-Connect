@@ -1,5 +1,20 @@
 # Changelog
 
+## v1.0.8 (2026-06-12)
+
+### Bug修复
+- 修复`login_once()`中`_last_discovery_time`变量未声明`global`导致`UnboundLocalError`，造成监控线程静默崩溃。
+- 修复监控线程崩溃后无法自动恢复的问题，添加崩溃自恢复机制（最多10次重启）。
+
+### 新增
+- 新增Wi-Fi适配器省电模式禁用：程序启动时自动禁用Wi-Fi的DeviceSleepOnDisconnect和电源管理，防止锁屏后Wi-Fi断开。
+- 新增系统睡眠阻止：通过`SetThreadExecutionState`阻止Windows进入低功耗状态（Modern Standby），保持网络活跃。
+- 新增崩溃自恢复：监控线程崩溃后自动重启，带指数退避（5秒、10秒、15秒...最多30秒），防止重启风暴。
+
+### 兼容性
+- 所有CLI参数保持不变。
+- 后台托盘、静默启动、开机自启行为不变。
+
 ## v1.0.7 (2026-06-01)
 
 ### Bug修复

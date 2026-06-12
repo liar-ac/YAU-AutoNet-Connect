@@ -16,6 +16,7 @@ __pycache__/
 # PyInstaller
 build/
 dist/
+*.exe
 
 # 开发工具
 .playwright-cli/
