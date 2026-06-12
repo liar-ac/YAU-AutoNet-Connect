@@ -278,13 +278,13 @@ def _powershell_no_proxy_fetch(url, timeout=10):
             return None
         if not decoded or len(decoded) < 5:
             return None
-        # Check for PowerShell error indicators in decoded content
+        # Check for PowerShell error indicators in stderr (not the web page body)
         error_indicators = [
             "CommandNotFoundException", "ParserError", "ParentContainsErrorRecordException",
             "不是内部或外部命令", "所在位置", "FullyQualifiedErrorId",
         ]
         for indicator in error_indicators:
-            if indicator in decoded:
+            if indicator in stderr:
                 return None
         return decoded
     except (subprocess.TimeoutExpired, Exception):
@@ -538,10 +538,10 @@ def fetch_portal_text_resilient(url, headers=None, timeout=10, purpose="status",
         if route_added:
             try:
                 text = fetch_direct_text(url, headers=headers, timeout=timeout)
-                _cleanup_route_repair(portal_host)
                 return text, "route_repair"
             except (OSError, ValueError) as e:
                 errors.append("L3_route_repair: route added but fetch failed: {0}".format(e))
+            finally:
                 _cleanup_route_repair(portal_host)
         else:
             errors.append("L3_route_repair: could not repair route")
@@ -551,14 +551,7 @@ def fetch_portal_text_resilient(url, headers=None, timeout=10, purpose="status",
     # Layer 4: PowerShell .NET WebClient no proxy (EncodedCommand)
     ps_result = _powershell_no_proxy_fetch(url, timeout=min(timeout, 15))
     if ps_result:
-        # Validate it's real JSONP/JSON, not a PowerShell error
-        try:
-            obj = jsonp_to_obj(ps_result)
-            if isinstance(obj, dict) and "result" in obj:
-                return ps_result, "powershell_no_proxy"
-        except (ValueError, json.JSONDecodeError):
-            pass
-        errors.append("L4_powershell_no_proxy: response was not valid JSONP/JSON")
+        return ps_result, "powershell_no_proxy"
     else:
         errors.append("L4_powershell_no_proxy: failed")
 
@@ -756,7 +749,10 @@ def invoke_jsonp(portal_base, path, params=None, timeout=10, force_trailing_lang
     if "jsVersion" not in keys:
         all_params.append(("jsVersion", "4.X"))
     all_params.append(("v", random.randint(500, 10500)))
-    if force_trailing_lang or "lang" not in keys:
+    if force_trailing_lang:
+        all_params = [(k, v) for k, v in all_params if k != "lang"]
+        all_params.append(("lang", "zh"))
+    elif "lang" not in keys:
         all_params.append(("lang", "zh"))
     url = "{0}{1}?{2}".format(portal_base.rstrip("/"), path, query_string(all_params))
     headers = {
@@ -780,7 +776,10 @@ def invoke_url_jsonp(url_base, params=None, timeout=10, force_trailing_lang=Fals
     if "jsVersion" not in keys:
         all_params.append(("jsVersion", "4.2.1"))
     all_params.append(("v", random.randint(500, 10500)))
-    if force_trailing_lang or "lang" not in keys:
+    if force_trailing_lang:
+        all_params = [(k, v) for k, v in all_params if k != "lang"]
+        all_params.append(("lang", "zh"))
+    elif "lang" not in keys:
         all_params.append(("lang", "zh"))
     url = "{0}?{1}".format(url_base, query_string(all_params))
     referer = (portal_base or DEFAULT_PORTAL).rstrip("/") + "/"
@@ -1031,9 +1030,6 @@ def login_once(config, args, failure_state=None):
 
         if failure_state is not None:
             failure_state["consecutive_failures"] = failure_state.get("consecutive_failures", 0) + 1
-            count = failure_state["consecutive_failures"]
-        else:
-            count = 1
 
         write_log(args.log, "网络中断，恢复中...")
         # Immediately request Wi-Fi reconnect (always try, even without configured SSID)
@@ -1148,10 +1144,13 @@ def login_once(config, args, failure_state=None):
         return False
     finally:
         password = None
+        if _cached_login_params is not None:
+            _cached_login_params["password"] = None
 
 
 def check_only(args):
-    status = get_status(args.portal_base)
+    allow_bypass = getattr(args, "allow_temporary_proxy_bypass", False)
+    status = get_status(args.portal_base, allow_proxy_bypass=allow_bypass)
     if not status["reachable"]:
         write_log(args.log, "portal不可达: {0}".format(status["error"]))
         return 2
@@ -1982,7 +1981,7 @@ def _get_portal_route_info(portal_host):
         route_out = _run_cmd_hidden(["route", "print", portal_host], timeout=10)
         in_active = False
         for line in route_out.splitlines():
-            if "Active Routes" in line:
+            if "Active Routes" in line or "活动路由" in line:
                 in_active = True
                 continue
             if in_active:
@@ -1990,7 +1989,7 @@ def _get_portal_route_info(portal_host):
                 if len(parts) >= 5:
                     dest, mask, gw, iface, metric = parts[0], parts[1], parts[2], parts[3], parts[4]
                     if dest == portal_host or dest == "0.0.0.0":
-                        result["nextHop"] = gw
+                        result["nextHop"] = gw if gw.lower() != "on-link" else None
                         result["sourceIP"] = iface
                         result["metric"] = metric
                         break
@@ -2536,7 +2535,10 @@ def main():
     ensure_process_proxy_bypass_for_portal()
 
     if args.init:
-        init_config(args)
+        init_result = init_config(args)
+        if init_result is None and not _has_console_stdin():
+            # GUI init was cancelled - abort
+            return 0
         if not args.once and not args.check and not args.tray:
             return 0
     if args.check:
