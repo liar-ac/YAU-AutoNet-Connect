@@ -1536,7 +1536,7 @@ def disable_wifi_power_save(log_fn=None):
         "$nics = Get-WmiObject -Class MSPower_DeviceEnable -Namespace root\\wmi -ErrorAction SilentlyContinue; "
         "if ($nics) {{ "
         "  foreach ($nic in $nics) {{ "
-        "    if ($nic.InstanceName -match 'Wireless|Wi-Fi|802\\\\.11|WLAN') {{ "
+        "    if ($nic.InstanceName -match 'Wireless|Wi-Fi|802\\.11|WLAN') {{ "
         "      $nic.Enable = $false; $nic.Put() | Out-Null; "
         "      Write-Output 'WMI_SET_OK' "
         "    }} "
