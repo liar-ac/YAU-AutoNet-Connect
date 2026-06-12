@@ -5,11 +5,37 @@
 ### Bug修复
 - 修复`login_once()`中`_last_discovery_time`变量未声明`global`导致`UnboundLocalError`，造成监控线程静默崩溃。
 - 修复监控线程崩溃后无法自动恢复的问题，添加崩溃自恢复机制（最多10次重启）。
+- 修复`_console_ctrl_handler`阻止系统关机/注销的问题（仅处理`CTRL_CLOSE_EVENT`）。
+- 修复`_restore_system_sleep`永远不会被调用的问题（注册`atexit`+`quit_app`显式调用）。
+- 修复PowerShell格式化占位符`%s`应为`{0}|{1}|{2}`的问题（影响路由修复功能）。
+- 修复`get_status`对畸形portal响应的`int()`类型转换异常。
+- 修复`write_log`文件写入异常导致监控循环崩溃的问题。
+- 修复`disable_wifi_power_save`中正则转义错误（`802\\\\.11`→`802\\.11`）。
+- 修复`check_only`忽略`--allow-temporary-proxy-bypass`参数的问题。
+- 修复路由解析在中文Windows失败的问题（添加`活动路由`匹配）。
+- 修复`On-link`被缓存为网关IP导致路由修复失败的问题。
+- 修复`force_trailing_lang=True`时产生重复`lang`参数的问题。
+- 修复GUI初始化取消后`--once`路径继续执行导致崩溃的问题。
+- 修复`_powershell_no_proxy_fetch`错误指示器检查web页面而非stderr的问题。
+- 修复Layer 4传输层验证不一致的问题（与Layer 1-3对齐）。
+- 修复路由修复在非OSError异常时泄漏的问题（使用`finally`清理）。
+- 修复`init_config`返回值无法区分取消和成功的问题。
+- 修复快速重试机制因密码缓存清理而失效的问题（改为从config重新解密）。
+- 移除未使用的`count`变量和不可达的死代码。
 
 ### 新增
 - 新增Wi-Fi适配器省电模式禁用：程序启动时自动禁用Wi-Fi的DeviceSleepOnDisconnect和电源管理，防止锁屏后Wi-Fi断开。
 - 新增系统睡眠阻止：通过`SetThreadExecutionState`阻止Windows进入低功耗状态（Modern Standby），保持网络活跃。
 - 新增崩溃自恢复：监控线程崩溃后自动重启，带线性退避（5秒、10秒、15秒...最多30秒），防止重启风暴。
+- 非tray模式主循环也支持动态间隔（在线60秒、恢复中10秒）。
+
+### 改进
+- 修复PyInstaller打包配置：移除`tkinter.commondialog`排除项、添加`tempfile` hiddenimport。
+- 改进测试：Referer断言验证实际值、添加`normalize_interval`边界值测试。
+- 更新`.gitignore`添加`*.exe`模式。
+
+### 安全
+- 密码不再缓存在`_cached_login_params`中，快速重试时从config重新解密。
 
 ### 兼容性
 - 所有CLI参数保持不变。
