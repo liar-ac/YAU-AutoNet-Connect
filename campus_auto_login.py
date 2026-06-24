@@ -589,6 +589,20 @@ def app_base_dir():
 SCRIPT_DIR = app_base_dir()
 
 
+def _user_data_dir():
+    """Return %APPDATA%/YAU-AutoNet-Connect, creating it if needed."""
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        d = Path(appdata) / "YAU-AutoNet-Connect"
+    else:
+        d = Path.home() / ".campus-auto-login"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+USER_DATA_DIR = _user_data_dir()
+
+
 def _reattach_console():
     """windowed 模式下双击无终端，但从 cmd 运行时需要恢复输出到父终端。"""
     if not getattr(sys, "frozen", False):
@@ -607,6 +621,9 @@ DEFAULT_CONFIG = SCRIPT_DIR / "campus_login_py.config.json"
 DEFAULT_PS_CONFIG = SCRIPT_DIR / "campus_login.config.json"
 DEFAULT_LOG = SCRIPT_DIR / "campus_auto_login_py.log"
 ROUTE_CACHE = SCRIPT_DIR / "campus_route_cache.json"
+# Fallback locations under %APPDATA% for when exe and config are in different dirs
+_USER_CONFIG = USER_DATA_DIR / "campus_login_py.config.json"
+_USER_PS_CONFIG = USER_DATA_DIR / "campus_login.config.json"
 MIN_INTERVAL_SECONDS = 5
 MAX_INTERVAL_SECONDS = 30
 
@@ -820,12 +837,69 @@ def client_info_from_status(status_raw):
     return str(ip), str(mac).replace("-", "").replace(":", "")
 
 
+def _find_config_file(config_path):
+    """Search for config in exe dir, parent dir, cwd, then %APPDATA%. Returns Path or None."""
+    if config_path != DEFAULT_CONFIG:
+        return config_path if config_path.exists() else None
+    # Build ordered candidate list: exe dir, parent of exe dir, cwd, %APPDATA%
+    parent_dir = SCRIPT_DIR.parent
+    cwd = Path.cwd()
+    seen = set()
+    candidates = []
+    for p in [
+        SCRIPT_DIR / "campus_login_py.config.json",
+        SCRIPT_DIR / "campus_login.config.json",
+        parent_dir / "campus_login_py.config.json",
+        parent_dir / "campus_login.config.json",
+        cwd / "campus_login_py.config.json",
+        cwd / "campus_login.config.json",
+        _USER_CONFIG,
+        _USER_PS_CONFIG,
+    ]:
+        key = str(p.resolve())
+        if key not in seen:
+            seen.add(key)
+            candidates.append(p)
+    for c in candidates:
+        if c.exists():
+            return c
+    return None
+
+
+def _maybe_migrate_config(found_path):
+    """Copy a config found outside %APPDATA% into %APPDATA% for future runs."""
+    try:
+        target = _USER_PS_CONFIG if found_path.name == "campus_login.config.json" else _USER_CONFIG
+        if target.exists():
+            return  # don't overwrite existing
+        import shutil
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(str(found_path), str(target))
+    except Exception:
+        pass  # best-effort, don't crash
+
+
 def read_config(config_path):
-    if not config_path.exists():
-        if config_path == DEFAULT_CONFIG and DEFAULT_PS_CONFIG.exists():
-            return read_powershell_config(DEFAULT_PS_CONFIG)
-        raise FileNotFoundError("Config not found. Run: campus_auto_login_cli.exe --init")
-    with config_path.open("r", encoding="utf-8-sig") as f:
+    found = _find_config_file(config_path)
+    if found is None:
+        searched = [
+            str(SCRIPT_DIR / "campus_login_py.config.json"),
+            str(SCRIPT_DIR / "campus_login.config.json"),
+            str(SCRIPT_DIR.parent / "campus_login_py.config.json"),
+            str(SCRIPT_DIR.parent / "campus_login.config.json"),
+            str(Path.cwd() / "campus_login_py.config.json"),
+            str(Path.cwd() / "campus_login.config.json"),
+            str(_USER_CONFIG),
+            str(_USER_PS_CONFIG),
+        ]
+        raise FileNotFoundError(
+            "Config not found. Searched:\n  " + "\n  ".join(searched) +
+            "\nRun: campus_auto_login_cli.exe --init")
+    # Auto-migrate to %APPDATA% so future runs always find it
+    _maybe_migrate_config(found)
+    if found.name == "campus_login.config.json":
+        return read_powershell_config(found)
+    with found.open("r", encoding="utf-8-sig") as f:
         data = json.load(f)
     if not data.get("username") or not data.get("password_dpapi"):
         raise ValueError("Config misses username or password_dpapi. Run: campus_auto_login_cli.exe --init")
@@ -919,17 +993,19 @@ def init_config(args):
         "service_suffix": suffix,
         "terminal_type": args.terminal_type,
     }
-    args.config.parent.mkdir(parents=True, exist_ok=True)
-    with args.config.open("w", encoding="utf-8") as f:
+    # Save to %APPDATA% so config survives exe directory changes
+    save_path = _USER_CONFIG
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    with save_path.open("w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     if _has_console_stdin():
-        write_log(args.log, "Config created:{0}".format(args.config))
+        write_log(args.log, "Config created:{0}".format(save_path))
     else:
         import tkinter as tk
         from tkinter import messagebox
         root = tk.Tk()
         root.withdraw()
-        messagebox.showinfo("初始化完成", "配置已保存到:\n{0}\n\n双击 campus_auto_login.exe 即可使用。".format(args.config), parent=root)
+        messagebox.showinfo("初始化完成", "配置已保存到:\n{0}\n\n双击 campus_auto_login.exe 即可使用。".format(save_path), parent=root)
         root.destroy()
     return True
 

@@ -2,6 +2,7 @@
 """Lightweight tests for campus_auto_login (no network required)."""
 import os
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import campus_auto_login as campus_module
@@ -30,6 +31,7 @@ from campus_auto_login import (
     wait_for_portal_ready,
     __version__,
     _extract_portal_from_url,
+    _find_config_file,
     _get_portal_route_info,
     _is_socket_unreachable_error,
     _test_portal_candidate,
@@ -742,6 +744,60 @@ class TestDiscoverPortalPriority(unittest.TestCase):
         mock_gw.return_value = None
         result = discover_portal_base("http://10.200.84.3", timeout=1)
         self.assertEqual(result, "http://10.200.84.3")
+
+
+class TestFindConfigFile(unittest.TestCase):
+    def test_returns_none_when_no_config_found(self):
+        """Returns None when no config exists anywhere."""
+        with patch.object(Path, "exists", return_value=False):
+            result = _find_config_file(campus_module.DEFAULT_CONFIG)
+            self.assertIsNone(result)
+
+    def test_read_config_searches_appdata_fallback(self):
+        """read_config should find config in %APPDATA% when exe dir has none."""
+        import tempfile, json
+        fake_config = {"username": "test", "password_dpapi": "fake", "portal_base": "http://10.200.84.3"}
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            # Make SCRIPT_DIR point to a subdir with no configs
+            subdir = td_path / "app"
+            subdir.mkdir()
+            fake_path = td_path / "campus_login_py.config.json"
+            fake_path.write_text(json.dumps(fake_config), encoding="utf-8")
+            with patch.object(campus_module, "SCRIPT_DIR", subdir), \
+                 patch.object(campus_module, "DEFAULT_CONFIG", subdir / "campus_login_py.config.json"), \
+                 patch.object(campus_module, "DEFAULT_PS_CONFIG", subdir / "campus_login.config.json"), \
+                 patch.object(campus_module, "_USER_CONFIG", fake_path), \
+                 patch.object(campus_module, "_USER_PS_CONFIG", td_path / "nonexistent_user_ps.json"), \
+                 patch("campus_auto_login.Path") as mock_path_cls:
+                # Make Path.cwd() return td_path
+                mock_path_cls.cwd.return_value = td_path
+                mock_path_cls.side_effect = lambda *a: Path(*a)
+                result = campus_module.read_config(campus_module.DEFAULT_CONFIG)
+                self.assertEqual(result["username"], "test")
+                self.assertEqual(result["config_format"], "python")
+
+    def test_read_config_searches_appdata_ps_fallback(self):
+        """read_config should find PowerShell config in %APPDATA% as last resort."""
+        import tempfile, json
+        fake_config = {"Username": "test", "Password": "01000000deadbeef", "PortalBase": "http://10.200.84.3"}
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            subdir = td_path / "app"
+            subdir.mkdir()
+            fake_path = td_path / "campus_login.config.json"
+            fake_path.write_text(json.dumps(fake_config), encoding="utf-8")
+            with patch.object(campus_module, "SCRIPT_DIR", subdir), \
+                 patch.object(campus_module, "DEFAULT_CONFIG", subdir / "campus_login_py.config.json"), \
+                 patch.object(campus_module, "DEFAULT_PS_CONFIG", subdir / "campus_login.config.json"), \
+                 patch.object(campus_module, "_USER_CONFIG", td_path / "nonexistent_user_py.json"), \
+                 patch.object(campus_module, "_USER_PS_CONFIG", fake_path), \
+                 patch("campus_auto_login.Path") as mock_path_cls:
+                mock_path_cls.cwd.return_value = td_path
+                mock_path_cls.side_effect = lambda *a: Path(*a)
+                result = campus_module.read_config(campus_module.DEFAULT_CONFIG)
+                self.assertEqual(result["username"], "test")
+                self.assertEqual(result["config_format"], "powershell")
 
 
 if __name__ == "__main__":

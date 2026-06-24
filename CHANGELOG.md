@@ -21,7 +21,11 @@
 - 修复路由修复在非OSError异常时泄漏的问题（使用`finally`清理）。
 - 修复`init_config`返回值无法区分取消和成功的问题。
 - 修复快速重试机制因密码缓存清理而失效的问题（改为从config重新解密）。
+- 修复exe与配置文件不在同一目录时启动失败的问题，配置文件查找增加`%APPDATA%\YAU-AutoNet-Connect`兜底路径。
 - 移除未使用的`count`变量和不可达的死代码。
+
+### 改进
+- `--init`生成的配置文件默认保存到`%APPDATA%\YAU-AutoNet-Connect`，不受exe存放位置影响。
 
 ### 新增
 - 新增Wi-Fi适配器省电模式禁用：程序启动时自动禁用Wi-Fi的DeviceSleepOnDisconnect和电源管理，防止锁屏后Wi-Fi断开。
