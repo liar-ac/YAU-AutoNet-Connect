@@ -101,7 +101,6 @@ def fetch_text_with_retry(url, headers=None, timeout=10, retries=None):
     Returns (text, attempt_number) where attempt is 1-based."""
     if retries is None:
         retries = [1, 3, 5]  # retry delays in seconds
-    last_exc = None
     for attempt, delay in enumerate([0] + retries):
         if delay > 0:
             time.sleep(delay)
@@ -111,7 +110,6 @@ def fetch_text_with_retry(url, headers=None, timeout=10, retries=None):
         except (OSError, ValueError) as exc:
             if not _is_socket_unreachable_error(exc) or attempt >= len(retries):
                 raise
-            last_exc = exc
 
 
 # ---------------------------------------------------------------------------
@@ -2123,7 +2121,7 @@ def _get_portal_route_info(portal_host):
             if in_active:
                 parts = line.split()
                 if len(parts) >= 5:
-                    dest, mask, gw, iface, metric = parts[0], parts[1], parts[2], parts[3], parts[4]
+                    dest, _, gw, iface, metric = parts[0], parts[1], parts[2], parts[3], parts[4]
                     if dest == portal_host or dest == "0.0.0.0":
                         result["nextHop"] = gw if gw.lower() != "on-link" else None
                         result["sourceIP"] = iface
@@ -2546,7 +2544,6 @@ def _toggle_auto_start(icon, item):
 
 
 def _build_menu():
-    import pystray
     from pystray import Menu, MenuItem
     _auto_start_checked[0] = is_auto_start_enabled()
     return Menu(
