@@ -2907,231 +2907,182 @@ def run_tray_mode(args):
     _tk_root.mainloop()
 
 
-def main():
-    args = parse_args()
+# ---------------------------------------------------------------------------
+# Command handlers — extracted from main() for readability. Each returns the
+# process exit code. Behavior is identical to the previous inline blocks.
+# ---------------------------------------------------------------------------
 
-    # Set UTF-8 output for Windows console
-    if sys.platform == "win32":
+def _cmd_show_config_path(args):
+    config_file = _find_config_file(args.config)
+    if config_file:
+        print("配置文件路径: {0}".format(config_file))
+    else:
+        print("未找到配置文件")
+        print("默认搜索路径:")
+        print("  1. exe目录: {0}".format(SCRIPT_DIR))
+        print("  2. exe父目录: {0}".format(SCRIPT_DIR.parent))
+        print("  3. 当前目录: {0}".format(Path.cwd()))
+        print("  4. 用户配置目录: {0}".format(_user_data_dir()))
+    return 0
+
+
+def _cmd_reset_config(args):
+    response = input("确认删除所有配置文件？(yes/no): ").strip().lower()
+    if response != "yes":
+        print("已取消")
+        return 0
+    deleted = []
+    # Search all possible config locations
+    for config_name in ["campus_login_py.config.json", "campus_login.config.json"]:
+        for base_dir in [SCRIPT_DIR, SCRIPT_DIR.parent, Path.cwd(), _user_data_dir()]:
+            config_path = base_dir / config_name
+            if config_path.exists():
+                try:
+                    config_path.unlink()
+                    deleted.append(str(config_path))
+                except Exception as e:
+                    print("删除失败 {0}: {1}".format(config_path, e))
+    # Also delete route cache
+    cache_file = Path("campus_route_cache.json")
+    if cache_file.exists():
         try:
-            sys.stdout.reconfigure(encoding='utf-8')
+            cache_file.unlink()
+            deleted.append(str(cache_file))
         except Exception:
             pass
+    if deleted:
+        print("已删除:")
+        for p in deleted:
+            print("  {0}".format(p))
+    else:
+        print("未找到配置文件")
+    return 0
 
-    # Set global log level
-    global _log_level
-    _log_level = args.log_level
 
-    # Handle --export-logs
-    if args.export_logs:
-        export_logs_to_zip()
-        return 0
+def _cmd_check_wifi(args):
+    ssid = get_current_wifi_ssid()
+    write_log(args.log, "当前Wi-Fi: {0}".format(ssid or "未连接"))
+    if args.campus_ssid:
+        check_wifi_and_warn(args.campus_ssid, log_fn=lambda msg: write_log(args.log, msg))
+    return 0
 
-    # Use timestamped log file by default
-    if args.log == DEFAULT_LOG:
-        args.log = get_timestamped_log_path()
 
-    # Handle --show-config-path
-    if args.show_config_path:
-        config_file = _find_config_file(args.config)
-        if config_file:
-            print("配置文件路径: {0}".format(config_file))
-        else:
-            print("未找到配置文件")
-            print("默认搜索路径:")
-            print("  1. exe目录: {0}".format(SCRIPT_DIR))
-            print("  2. exe父目录: {0}".format(SCRIPT_DIR.parent))
-            print("  3. 当前目录: {0}".format(Path.cwd()))
-            print("  4. 用户配置目录: {0}".format(_user_data_dir()))
-        return 0
+def _cmd_set_campus_ssid(args):
+    ssid = get_current_wifi_ssid()
+    if not ssid:
+        write_log(args.log, "未检测到Wi-Fi，请先连接校园网Wi-Fi")
+        return 1
+    write_log(args.log, "当前Wi-Fi: {0}".format(ssid))
+    write_log(args.log, "保存为校园网SSID:")
+    write_log(args.log, '  campus_auto_login_cli.exe --init --campus-ssid "{0}"'.format(ssid))
+    return 0
 
-    # Handle --reset-config
-    if args.reset_config:
-        response = input("确认删除所有配置文件？(yes/no): ").strip().lower()
-        if response != "yes":
-            print("已取消")
-            return 0
-        deleted = []
-        # Search all possible config locations
-        for config_name in ["campus_login_py.config.json", "campus_login.config.json"]:
-            for base_dir in [SCRIPT_DIR, SCRIPT_DIR.parent, Path.cwd(), _user_data_dir()]:
-                config_path = base_dir / config_name
-                if config_path.exists():
-                    try:
-                        config_path.unlink()
-                        deleted.append(str(config_path))
-                    except Exception as e:
-                        print("删除失败 {0}: {1}".format(config_path, e))
-        # Also delete route cache
-        cache_file = Path("campus_route_cache.json")
-        if cache_file.exists():
-            try:
-                cache_file.unlink()
-                deleted.append(str(cache_file))
-            except Exception:
-                pass
-        if deleted:
-            print("已删除:")
-            for p in deleted:
-                print("  {0}".format(p))
-        else:
-            print("未找到配置文件")
-        return 0
 
-    requested_interval = args.interval
-    args.interval = normalize_interval(args.interval)
-
-    # Ensure portal hosts bypass any system proxy at the process level
-    ensure_process_proxy_bypass_for_portal()
-
-    # Auto-detect first run: if no config file exists and no explicit command, trigger init
-    config_file = _find_config_file(args.config)
-    if config_file is None and not args.init and not args.check and not args.diagnose and not args.check_wifi and not args.set_campus_ssid and not args.force_portal_reachable and not args.show_config_path and not args.reset_config:
-        # First run detected: trigger GUI initialization automatically
-        args.init = True
-        # After init, if no other action specified, default to tray mode
-        if not args.once and not args.tray:
-            args.tray = True
-
-    if args.init:
-        init_result = init_config(args)
-        if init_result is False:
-            # GUI init was cancelled - abort
-            return 0
-        if not args.once and not args.check and not args.tray:
-            return 0
-    if args.check:
-        return check_only(args)
-
-    if args.check_wifi:
-        ssid = get_current_wifi_ssid()
-        write_log(args.log, "当前Wi-Fi: {0}".format(ssid or "未连接"))
-        if args.campus_ssid:
-            check_wifi_and_warn(args.campus_ssid, log_fn=lambda msg: write_log(args.log, msg))
-        return 0
-
-    if args.set_campus_ssid:
-        ssid = get_current_wifi_ssid()
-        if not ssid:
-            write_log(args.log, "未检测到Wi-Fi，请先连接校园网Wi-Fi")
-            return 1
-        write_log(args.log, "当前Wi-Fi: {0}".format(ssid))
-        write_log(args.log, "保存为校园网SSID:")
-        write_log(args.log, '  campus_auto_login_cli.exe --init --campus-ssid "{0}"'.format(ssid))
-        return 0
-
-    if args.force_portal_reachable:
-        write_log(args.log, "=== 强制portal连通模式 ===")
-        write_log(args.log, "目标portal: {0}".format(args.portal_base))
-        ssid = get_current_wifi_ssid()
-        write_log(args.log, "当前Wi-Fi: {0}".format(ssid or "未连接"))
-        gw = _get_default_gateway()
-        write_log(args.log, "默认网关: {0}".format(gw or "未知"))
-        proxy_server, proxy_override = _get_proxy_details()
-        write_log(args.log, "系统代理: {0}".format(proxy_server or "未设置"))
-        # Try each layer explicitly, but allow time for Wi-Fi/DHCP route recovery.
-        test_url = "{0}/drcom/chkstatus?callback=_fr&jsVersion=4.X&v=1&lang=zh".format(args.portal_base.rstrip("/"))
-        deadline = time.time() + 75
-        last_error = None
-        attempt = 0
-        while time.time() < deadline:
-            attempt += 1
-            try:
-                content, layer = fetch_portal_text_resilient(
-                    test_url, timeout=5, purpose="force",
-                    allow_proxy_bypass=args.allow_temporary_proxy_bypass,
-                )
-                write_log(args.log, "portal可达: {0}".format(layer))
-                _cache_campus_route(args.portal_base)
-                return 0
-            except OSError as exc:
-                last_error = exc
-                if attempt == 1:
-                    write_log(args.log, "等待网络恢复(最多75秒)...")
-                    reconnect_campus_wifi(args.campus_ssid, log_fn=lambda msg: write_log(args.log, msg))
-                time.sleep(5)
-        try:
-            raise last_error or OSError("portal unreachable")
-        except OSError as exc:
-            write_log(args.log, "所有传输层失败(75秒): {0}".format(exc))
-            log_portal_failure_matrix(args.portal_base, log_fn=lambda msg: write_log(args.log, msg))
-            return 1
-
-    if args.diagnose:
-        lines = diagnose_portal_connectivity(args.portal_base)
-        for line in lines:
-            write_log(args.log, line)
-        # Also test resilient fetch layers
-        write_log(args.log, "--- Resilient Transport Test ---")
-        test_url = "{0}/drcom/chkstatus?callback=_diag&jsVersion=4.X&v=1&lang=zh".format(args.portal_base.rstrip("/"))
+def _cmd_force_portal_reachable(args):
+    write_log(args.log, "=== 强制portal连通模式 ===")
+    write_log(args.log, "目标portal: {0}".format(args.portal_base))
+    ssid = get_current_wifi_ssid()
+    write_log(args.log, "当前Wi-Fi: {0}".format(ssid or "未连接"))
+    gw = _get_default_gateway()
+    write_log(args.log, "默认网关: {0}".format(gw or "未知"))
+    proxy_server, proxy_override = _get_proxy_details()
+    write_log(args.log, "系统代理: {0}".format(proxy_server or "未设置"))
+    # Try each layer explicitly, but allow time for Wi-Fi/DHCP route recovery.
+    test_url = "{0}/drcom/chkstatus?callback=_fr&jsVersion=4.X&v=1&lang=zh".format(args.portal_base.rstrip("/"))
+    deadline = time.time() + 75
+    last_error = None
+    attempt = 0
+    while time.time() < deadline:
+        attempt += 1
         try:
             content, layer = fetch_portal_text_resilient(
-                test_url, timeout=5, purpose="diagnose",
+                test_url, timeout=5, purpose="force",
                 allow_proxy_bypass=args.allow_temporary_proxy_bypass,
             )
-            write_log(args.log, "多层传输成功: {0}".format(layer))
+            write_log(args.log, "portal可达: {0}".format(layer))
             _cache_campus_route(args.portal_base)
+            return 0
         except OSError as exc:
-            write_log(args.log, "多层传输失败: {0}".format(exc))
-        # Portal auto-discovery
-        discovered = discover_portal_base(
-            args.portal_base, timeout=3,
-            log_fn=lambda msg: write_log(args.log, msg),
-        )
-        write_log(args.log, "发现portal: {0}".format(discovered))
-        return 0
+            last_error = exc
+            if attempt == 1:
+                write_log(args.log, "等待网络恢复(最多75秒)...")
+                reconnect_campus_wifi(args.campus_ssid, log_fn=lambda msg: write_log(args.log, msg))
+            time.sleep(5)
+    try:
+        raise last_error or OSError("portal unreachable")
+    except OSError as exc:
+        write_log(args.log, "所有传输层失败(75秒): {0}".format(exc))
+        log_portal_failure_matrix(args.portal_base, log_fn=lambda msg: write_log(args.log, msg))
+        return 1
 
-    if args.once:
-        config = read_config(args.config)
-        if args.portal_base != DEFAULT_PORTAL:
-            config["portal_base"] = args.portal_base.rstrip("/")
-        campus_ssid = args.campus_ssid or config.get("campus_ssid", "")
-        if campus_ssid:
-            check_wifi_and_warn(campus_ssid, log_fn=lambda msg: write_log(args.log, msg))
-        # Boot grace period
-        boot_grace_wait(log_fn=lambda msg: write_log(args.log, msg))
-        # Network ready gate
-        portal_host = parse.urlsplit(config["portal_base"]).hostname or "10.200.84.3"
-        if not wait_for_network_ready(portal_host, timeout_seconds=90, log_fn=lambda msg: write_log(args.log, msg), campus_ssid=campus_ssid):
-            write_log(args.log, "网络就绪等待超时，继续尝试")
-        # Portal auto-discovery for --once mode
-        discovered = discover_portal_base(
-            config["portal_base"], timeout=3,
-            log_fn=lambda msg: write_log(args.log, msg),
-        )
-        if discovered.rstrip("/") != config["portal_base"].rstrip("/"):
-            write_log(args.log, "发现portal: {0}".format(discovered))
-            config["portal_base"] = discovered
-        # Wait for portal to become ready (--once can wait longer)
-        status = wait_for_portal_ready(
-            config["portal_base"], timeout_seconds=60, interval=5,
-            log_fn=lambda msg: write_log(args.log, msg),
+
+def _cmd_diagnose(args):
+    lines = diagnose_portal_connectivity(args.portal_base)
+    for line in lines:
+        write_log(args.log, line)
+    # Also test resilient fetch layers
+    write_log(args.log, "--- Resilient Transport Test ---")
+    test_url = "{0}/drcom/chkstatus?callback=_diag&jsVersion=4.X&v=1&lang=zh".format(args.portal_base.rstrip("/"))
+    try:
+        content, layer = fetch_portal_text_resilient(
+            test_url, timeout=5, purpose="diagnose",
             allow_proxy_bypass=args.allow_temporary_proxy_bypass,
-            campus_ssid=campus_ssid,
         )
-        if status is None:
-            write_log(args.log, "portal不可达，校园网可能未连接")
-            diagnose_portal_connectivity(config["portal_base"], log_fn=lambda msg: write_log(args.log, msg))
-            log_portal_failure_matrix(config["portal_base"], log_fn=lambda msg: write_log(args.log, msg))
-            return 1
-        if status["online"]:
-            write_log(args.log, "已连接，无需登录")
-            return 0
-        # Portal reachable and offline - attempt login
-        write_log(args.log, "portal可达，账号未认证，尝试登录...")
-        return 0 if login_once(config, args) else 1
+        write_log(args.log, "多层传输成功: {0}".format(layer))
+        _cache_campus_route(args.portal_base)
+    except OSError as exc:
+        write_log(args.log, "多层传输失败: {0}".format(exc))
+    # Portal auto-discovery
+    discovered = discover_portal_base(
+        args.portal_base, timeout=3,
+        log_fn=lambda msg: write_log(args.log, msg),
+    )
+    write_log(args.log, "发现portal: {0}".format(discovered))
+    return 0
 
-    if not args.tray and not args.init and not args.once and not args.check:
-        args.tray = True
 
-    if args.tray:
-        if not check_single_instance():
-            ctypes.windll.user32.MessageBoxW(
-                0, "校园网自动登录已在运行中，请勿重复启动。", "Campus Auto Login", 0x40
-            )
-            return 0
-        run_tray_mode(args)
+def _cmd_once(args):
+    config = read_config(args.config)
+    if args.portal_base != DEFAULT_PORTAL:
+        config["portal_base"] = args.portal_base.rstrip("/")
+    campus_ssid = args.campus_ssid or config.get("campus_ssid", "")
+    if campus_ssid:
+        check_wifi_and_warn(campus_ssid, log_fn=lambda msg: write_log(args.log, msg))
+    # Boot grace period
+    boot_grace_wait(log_fn=lambda msg: write_log(args.log, msg))
+    # Network ready gate
+    portal_host = parse.urlsplit(config["portal_base"]).hostname or "10.200.84.3"
+    if not wait_for_network_ready(portal_host, timeout_seconds=90, log_fn=lambda msg: write_log(args.log, msg), campus_ssid=campus_ssid):
+        write_log(args.log, "网络就绪等待超时，继续尝试")
+    # Portal auto-discovery for --once mode
+    discovered = discover_portal_base(
+        config["portal_base"], timeout=3,
+        log_fn=lambda msg: write_log(args.log, msg),
+    )
+    if discovered.rstrip("/") != config["portal_base"].rstrip("/"):
+        write_log(args.log, "发现portal: {0}".format(discovered))
+        config["portal_base"] = discovered
+    # Wait for portal to become ready (--once can wait longer)
+    status = wait_for_portal_ready(
+        config["portal_base"], timeout_seconds=60, interval=5,
+        log_fn=lambda msg: write_log(args.log, msg),
+        allow_proxy_bypass=args.allow_temporary_proxy_bypass,
+        campus_ssid=campus_ssid,
+    )
+    if status is None:
+        write_log(args.log, "portal不可达，校园网可能未连接")
+        diagnose_portal_connectivity(config["portal_base"], log_fn=lambda msg: write_log(args.log, msg))
+        log_portal_failure_matrix(config["portal_base"], log_fn=lambda msg: write_log(args.log, msg))
+        return 1
+    if status["online"]:
+        write_log(args.log, "已连接，无需登录")
         return 0
+    # Portal reachable and offline - attempt login
+    write_log(args.log, "portal可达，账号未认证，尝试登录...")
+    return 0 if login_once(config, args) else 1
 
+
+def _run_foreground_loop(args, requested_interval):
     config = read_config(args.config)
     if args.portal_base != DEFAULT_PORTAL:
         config["portal_base"] = args.portal_base.rstrip("/")
@@ -3171,6 +3122,93 @@ def main():
                 exc, min(30, 5 * restart_count), restart_count, MAX_LOOP_RESTARTS))
             time.sleep(min(30, 5 * restart_count))
     write_log(args.log, "监控循环重启次数过多，停止")
+    return 0
+
+
+def main():
+    args = parse_args()
+
+    # Set UTF-8 output for Windows console
+    if sys.platform == "win32":
+        try:
+            sys.stdout.reconfigure(encoding='utf-8')
+        except Exception:
+            pass
+
+    # Set global log level
+    global _log_level
+    _log_level = args.log_level
+
+    # Handle --export-logs
+    if args.export_logs:
+        export_logs_to_zip()
+        return 0
+
+    # Use timestamped log file by default
+    if args.log == DEFAULT_LOG:
+        args.log = get_timestamped_log_path()
+
+    # Handle --show-config-path
+    if args.show_config_path:
+        return _cmd_show_config_path(args)
+
+    # Handle --reset-config
+    if args.reset_config:
+        return _cmd_reset_config(args)
+
+    requested_interval = args.interval
+    args.interval = normalize_interval(args.interval)
+
+    # Ensure portal hosts bypass any system proxy at the process level
+    ensure_process_proxy_bypass_for_portal()
+
+    # Auto-detect first run: if no config file exists and no explicit command, trigger init
+    config_file = _find_config_file(args.config)
+    if config_file is None and not args.init and not args.check and not args.diagnose and not args.check_wifi and not args.set_campus_ssid and not args.force_portal_reachable and not args.show_config_path and not args.reset_config:
+        # First run detected: trigger GUI initialization automatically
+        args.init = True
+        # After init, if no other action specified, default to tray mode
+        if not args.once and not args.tray:
+            args.tray = True
+
+    if args.init:
+        init_result = init_config(args)
+        if init_result is False:
+            # GUI init was cancelled - abort
+            return 0
+        if not args.once and not args.check and not args.tray:
+            return 0
+    if args.check:
+        return check_only(args)
+
+    if args.check_wifi:
+        return _cmd_check_wifi(args)
+
+    if args.set_campus_ssid:
+        return _cmd_set_campus_ssid(args)
+
+    if args.force_portal_reachable:
+        return _cmd_force_portal_reachable(args)
+
+    if args.diagnose:
+        return _cmd_diagnose(args)
+
+    if args.once:
+        return _cmd_once(args)
+
+    if not args.tray and not args.init and not args.once and not args.check:
+        args.tray = True
+
+    if args.tray:
+        if not check_single_instance():
+            ctypes.windll.user32.MessageBoxW(
+                0, "校园网自动登录已在运行中，请勿重复启动。", "Campus Auto Login", 0x40
+            )
+            return 0
+        run_tray_mode(args)
+        return 0
+
+    return _run_foreground_loop(args, requested_interval)
 
 
 if __name__ == "__main__":
