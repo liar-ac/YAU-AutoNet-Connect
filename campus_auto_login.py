@@ -652,6 +652,134 @@ _log_lock = threading.Lock()
 _log_level = "info"  # Global log level: debug|info|warning|error
 _LOG_LEVELS = {"debug": 0, "info": 1, "warning": 2, "error": 3}
 
+# ---------------------------------------------------------------------------
+# i18n — lightweight translation framework
+# Default language is "zh"; all existing output preserved when not switched.
+# ---------------------------------------------------------------------------
+_i18n_lang = "zh"
+
+_i18n_strings = {
+    # Config management
+    "config_show_path":       {"zh": "配置文件路径: {0}", "en": "Config file path: {0}"},
+    "config_not_found":       {"zh": "未找到配置文件", "en": "No config file found"},
+    "config_reset_confirm":   {"zh": "确认删除所有配置文件？(yes/no): ", "en": "Delete all config files? (yes/no): "},
+    "config_reset_cancelled": {"zh": "已取消", "en": "Cancelled"},
+    "config_reset_deleted":   {"zh": "已删除:", "en": "Deleted:"},
+    "config_reset_none":      {"zh": "未找到配置文件", "en": "No config files found"},
+    "config_search_title":    {"zh": "默认搜索路径:", "en": "Default search paths:"},
+    "config_search_exe":      {"zh": "  1. exe目录: {0}", "en": "  1. exe dir: {0}"},
+    "config_search_parent":   {"zh": "  2. exe父目录: {0}", "en": "  2. exe parent: {0}"},
+    "config_search_cwd":      {"zh": "  3. 当前目录: {0}", "en": "  3. Current dir: {0}"},
+    "config_search_appdata":  {"zh": "  4. 用户配置目录: {0}", "en": "  4. User config dir: {0}"},
+    "config_integrity_fail":  {"zh": "配置文件完整性校验失败 ({0})。已备份到: {1}\n请运行 --reset-config 重新初始化。", "en": "Config integrity check failed ({0}). Backed up to: {1}\nRun --reset-config to reinitialize."},
+    "config_integrity_fail_nb":{"zh": "配置文件完整性校验失败 ({0})。\n请运行 --reset-config 重新初始化。", "en": "Config integrity check failed ({0}).\nRun --reset-config to reinitialize."},
+    # Startup / monitoring
+    "started_monitoring":     {"zh": "已启动，监控间隔={0}s", "en": "Started, monitoring interval={0}s"},
+    "interval_adjusted":      {"zh": "间隔调整: {0}秒 -> {1}秒", "en": "Interval adjusted: {0}s -> {1}s"},
+    "network_ready":          {"zh": "网络就绪", "en": "Network ready"},
+    "network_not_ready":      {"zh": "网络未就绪，进入正常重试", "en": "Network not ready, entering normal retry"},
+    "network_timeout":        {"zh": "网络就绪等待超时({0}秒)", "en": "Network ready timeout ({0}s)"},
+    "network_timeout_cont":   {"zh": "网络就绪等待超时，继续尝试", "en": "Network ready timeout, continuing"},
+    "boot_init_waiting":      {"zh": "开机初始化，等待网络就绪(最多{0}秒)...", "en": "Boot init, waiting for network (max {0}s)..."},
+    "online_status":          {"zh": "已连接 | {0}", "en": "Online | {0}"},
+    "not_authenticated":      {"zh": "portal可达，账号未认证，尝试登录...", "en": "Portal reachable, not authenticated, logging in..."},
+    "already_connected":      {"zh": "已连接，无需登录", "en": "Already connected, no login needed"},
+    "login_success":          {"zh": "登录成功，已上线", "en": "Login successful, now online"},
+    "login_failed":           {"zh": "登录失败", "en": "Login failed"},
+    "cached_login_ok":        {"zh": "缓存参数快速登录成功", "en": "Cached params fast login succeeded"},
+    "portal_confirm":         {"zh": "portal确认: {0}", "en": "Portal confirmed: {0}"},
+    # Network interruption
+    "network_interrupted":    {"zh": "网络中断，恢复中...", "en": "Network interrupted, recovering..."},
+    "network_restored":       {"zh": "快速恢复成功", "en": "Quick recovery succeeded"},
+    "portal_unreachable":     {"zh": "portal访问异常，尝试发现其他地址...", "en": "Portal unreachable, trying discovery..."},
+    "portal_discovered":      {"zh": "发现portal: {0}", "en": "Discovered portal: {0}"},
+    "portal_timeout":         {"zh": "portal不可达，校园网可能未连接", "en": "Portal unreachable, campus network may be disconnected"},
+    # Force portal / diagnose
+    "force_title":            {"zh": "=== 强制portal连通模式 ===", "en": "=== Force portal reachable mode ==="},
+    "force_target":           {"zh": "目标portal: {0}", "en": "Target portal: {0}"},
+    "default_gateway":        {"zh": "默认网关: {0}", "en": "Default gateway: {0}"},
+    "system_proxy":           {"zh": "系统代理: {0}", "en": "System proxy: {0}"},
+    "force_waiting":          {"zh": "等待网络恢复(最多75秒)...", "en": "Waiting for network recovery (max 75s)..."},
+    "force_reachable":        {"zh": "portal可达: {0}", "en": "Portal reachable: {0}"},
+    "force_all_failed":       {"zh": "所有传输层失败(75秒): {0}", "en": "All transport layers failed (75s): {0}"},
+    "diagnose_transport":     {"zh": "--- Resilient Transport Test ---", "en": "--- Resilient Transport Test ---"},
+    "diagnose_ok":            {"zh": "多层传输成功: {0}", "en": "Multi-layer transport succeeded: {0}"},
+    "diagnose_fail":          {"zh": "多层传输失败: {0}", "en": "Multi-layer transport failed: {0}"},
+    # Wi-Fi
+    "wifi_no_connection":     {"zh": "检测到物理网卡但未连接Wi-Fi，尝试主动连接...", "en": "Physical adapter found but no Wi-Fi, attempting connect..."},
+    "wifi_dhcp_wait":         {"zh": "Wi-Fi已连接({0})，等待DHCP分配IP...", "en": "Wi-Fi connected ({0}), waiting for DHCP IP..."},
+    "wifi_reconnecting":      {"zh": "正在重连Wi-Fi: {0}", "en": "Reconnecting Wi-Fi: {0}"},
+    "wifi_reconnect_ok":      {"zh": "Wi-Fi重连已请求: {0}", "en": "Wi-Fi reconnect requested: {0}"},
+    "wifi_reconnect_fail":    {"zh": "Wi-Fi重连失败: {0}", "en": "Wi-Fi reconnect failed: {0}"},
+    "wifi_power_save_off":    {"zh": "禁用Wi-Fi省电模式: {0}", "en": "Disabled Wi-Fi power save: {0}"},
+    "wifi_mismatch":          {"zh": "Wi-Fi不匹配: 当前'{0}'，校园网'{1}'", "en": "Wi-Fi mismatch: current '{0}', campus '{1}'"},
+    "current_wifi":           {"zh": "当前Wi-Fi: {0}", "en": "Current Wi-Fi: {0}"},
+    "wifi_not_detected":      {"zh": "未检测到Wi-Fi，请先连接校园网Wi-Fi", "en": "No Wi-Fi detected, connect to campus Wi-Fi first"},
+    "save_ssid_hint":         {"zh": "保存为校园网SSID:", "en": "Save as campus SSID:"},
+    "not_connected":          {"zh": "未连接", "en": "Not connected"},
+    "unknown":                {"zh": "未知", "en": "Unknown"},
+    "not_set":                {"zh": "未设置", "en": "Not set"},
+    # Monitor loop
+    "monitor_error":          {"zh": "登录异常（{0}），{1}秒后重试", "en": "Login error ({0}), retrying in {1}s"},
+    "monitor_crash":          {"zh": "监控循环崩溃（{0}），{1}秒后重启（{2}/{3}）", "en": "Monitor loop crashed ({0}), restarting in {1}s ({2}/{3})"},
+    "monitor_max_restarts":   {"zh": "监控循环重启次数过多，停止", "en": "Too many monitor restarts, stopping"},
+    "thread_exit":            {"zh": "监控线程异常退出，{0}秒后重启（{1}/{2}）", "en": "Monitor thread exited, restarting in {0}s ({1}/{2})"},
+    "thread_crash":           {"zh": "监控线程崩溃（{0}），{1}秒后重启（{2}/{3}）", "en": "Monitor thread crashed ({0}), restarting in {1}s ({2}/{3})"},
+    "thread_max_restarts":    {"zh": "监控线程重启次数过多，停止监控", "en": "Too many thread restarts, stopping"},
+    "sleep_wake_detected":    {"zh": "唤醒检测，立即检查网络", "en": "Wake detected, checking network immediately"},
+    # Tray
+    "tray_already_running":   {"zh": "校园网自动登录已在运行中，请勿重复启动。", "en": "Campus Auto Login is already running."},
+    "tray_title":             {"zh": "校园网自动登录", "en": "Campus Auto Login"},
+    "menu_network_status":    {"zh": "网络状态", "en": "Network Status"},
+    "menu_login_now":         {"zh": "立即登录", "en": "Login Now"},
+    "menu_auto_start":        {"zh": "开机自启", "en": "Auto-start"},
+    "menu_show_log":          {"zh": "查看日志", "en": "Show Log"},
+    "menu_exit":              {"zh": "退出", "en": "Exit"},
+    "notify_reconnecting":    {"zh": "校园网断开", "en": "Campus disconnected"},
+    "notify_reconnect_msg":   {"zh": "正在尝试重新连接...", "en": "Attempting to reconnect..."},
+    "notify_portal_down":     {"zh": "校园网Portal无法访问", "en": "Campus portal unreachable"},
+    "notify_portal_down_msg": {"zh": "检查网络连接或联系网络管理员", "en": "Check network or contact admin"},
+    "notify_restored":        {"zh": "校园网已恢复", "en": "Campus network restored"},
+    "notify_restored_msg":    {"zh": "网络连接已恢复正常", "en": "Network connection restored"},
+    "notify_login_ok":        {"zh": "✓ 登录成功", "en": "✓ Login successful"},
+    "notify_login_fail":      {"zh": "✗ 登录失败，请查看日志", "en": "✗ Login failed, check log"},
+    "notify_login_already":   {"zh": "已经在线，无需登录", "en": "Already online, no login needed"},
+    "notify_login_error":     {"zh": "登录出错：{0}", "en": "Login error: {0}"},
+    "notify_status_online":   {"zh": "✓ 已连接校园网\n状态：在线", "en": "✓ Connected to campus\nStatus: Online"},
+    "notify_status_portal":   {"zh": "⚠ 已连接到Portal\n状态：离线（需要登录）", "en": "⚠ Connected to portal\nStatus: Offline (login needed)"},
+    "notify_status_offline":  {"zh": "✗ Portal不可达\n请检查网络连接", "en": "✗ Portal unreachable\nCheck network connection"},
+    "notify_status_fail":     {"zh": "检测失败：{0}", "en": "Detection failed: {0}"},
+    # GUI init
+    "init_title":             {"zh": "校园网自动登录 - 初始化", "en": "Campus Auto Login - Setup"},
+    "init_username":          {"zh": "校园网用户名:", "en": "Campus username:"},
+    "init_password":          {"zh": "校园网密码:", "en": "Campus password:"},
+    "init_suffix":            {"zh": "运营商后缀:\n直接回车为默认\n@dx 电信\n@lt 联通", "en": "ISP suffix:\nPress Enter for default\n@dx Telecom\n@lt Unicom"},
+    "init_cancelled":         {"zh": "取消", "en": "Cancelled"},
+    "init_cancelled_msg":     {"zh": "初始化已取消。", "en": "Setup cancelled."},
+    "init_done":              {"zh": "初始化完成", "en": "Setup complete"},
+    "init_done_msg":          {"zh": "配置已保存到:\n{0}\n\n双击 campus_auto_login.exe 即可使用。", "en": "Config saved to:\n{0}\n\nDouble-click campus_auto_login.exe to use."},
+    # Log window
+    "log_window_title":       {"zh": "Campus Auto Login - 日志", "en": "Campus Auto Login - Log"},
+    # Generic
+    "user_stopped":           {"zh": "用户停止", "en": "User stopped"},
+    "fatal_error":            {"zh": "致命错误: {0}: {1}", "en": "Fatal error: {0}: {1}"},
+    "delete_failed":          {"zh": "删除失败 {0}: {1}", "en": "Delete failed {0}: {1}"},
+}
+
+
+def t(key, *args):
+    """Translate a key using the current language. Falls back to zh, then raw key."""
+    entry = _i18n_strings.get(key)
+    if entry is None:
+        return key.format(*args) if args else key
+    msg = entry.get(_i18n_lang) or entry.get("zh") or key
+    if args:
+        try:
+            return msg.format(*args)
+        except (IndexError, KeyError, ValueError):
+            return msg
+    return msg
+
 
 class DataBlob(ctypes.Structure):
     _fields_ = [
@@ -1113,21 +1241,21 @@ def _init_config_gui():
     root = tk.Tk()
     root.withdraw()
 
-    username = simpledialog.askstring("校园网自动登录 - 初始化", "校园网用户名:", parent=root)
+    username = simpledialog.askstring(t("init_title"), t("init_username"), parent=root)
     if not username:
-        messagebox.showinfo("取消", "初始化已取消。", parent=root)
+        messagebox.showinfo(t("init_cancelled"), t("init_cancelled_msg"), parent=root)
         root.destroy()
         return None
 
-    password = simpledialog.askstring("校园网自动登录 - 初始化", "校园网密码:", show="*", parent=root)
+    password = simpledialog.askstring(t("init_title"), t("init_password"), show="*", parent=root)
     if not password:
-        messagebox.showinfo("取消", "初始化已取消。", parent=root)
+        messagebox.showinfo(t("init_cancelled"), t("init_cancelled_msg"), parent=root)
         root.destroy()
         return None
 
     suffix = simpledialog.askstring(
-        "校园网自动登录 - 初始化",
-        "运营商后缀:\n直接回车为默认\n@dx 电信\n@lt 联通",
+        t("init_title"),
+        t("init_suffix"),
         parent=root,
     )
     if suffix is None:
@@ -1177,7 +1305,7 @@ def init_config(args):
         from tkinter import messagebox
         root = tk.Tk()
         root.withdraw()
-        messagebox.showinfo("初始化完成", "配置已保存到:\n{0}\n\n双击 campus_auto_login.exe 即可使用。".format(save_path), parent=root)
+        messagebox.showinfo(t("init_done"), t("init_done_msg", save_path), parent=root)
         root.destroy()
     return True
 
@@ -1279,7 +1407,7 @@ def login_once(config, args, failure_state=None):
                         time.sleep(1)
                         check = get_status(config["portal_base"], allow_proxy_bypass=allow_bypass)
                         if check["online"]:
-                            write_log(args.log, "缓存参数快速登录成功")
+                            write_log(args.log, t("cached_login_ok"))
                             return True
             except Exception:
                 pass  # fall through to normal recovery
@@ -1290,9 +1418,9 @@ def login_once(config, args, failure_state=None):
             failure_state["consecutive_failures"] = failure_state.get("consecutive_failures", 0) + 1
             # Show notification on first network failure
             if failure_state["consecutive_failures"] == 1:
-                show_tray_notification("校园网断开", "正在尝试重新连接...")
+                show_tray_notification(t("notify_reconnecting"), t("notify_reconnect_msg"))
 
-        write_log(args.log, "网络中断，恢复中...")
+        write_log(args.log, t("network_interrupted"))
         # Immediately request Wi-Fi reconnect (always try, even without configured SSID)
         campus_ssid = getattr(args, "campus_ssid", "") or config.get("campus_ssid", "")
         reconnect_campus_wifi(campus_ssid, log_fn=lambda msg: write_log(args.log, msg))
@@ -1300,19 +1428,19 @@ def login_once(config, args, failure_state=None):
         time.sleep(5)
         retry = get_status(config["portal_base"], allow_proxy_bypass=allow_bypass)
         if retry["state"] in ("online", "offline"):
-            write_log(args.log, "快速恢复成功")
+            write_log(args.log, t("network_restored"))
             status = retry
         else:
             # Still down, let the normal 10s loop handle further recovery
             return False
 
     if status["state"] == "portal_unreachable":
-        write_log(args.log, "portal访问异常，尝试发现其他地址...")
+        write_log(args.log, t("portal_unreachable"))
         if failure_state is not None:
             failure_state["consecutive_failures"] = failure_state.get("consecutive_failures", 0) + 1
             # Show notification on portal unreachable
             if failure_state["consecutive_failures"] == 1:
-                show_tray_notification("校园网Portal无法访问", "检查网络连接或联系网络管理员")
+                show_tray_notification(t("notify_portal_down"), t("notify_portal_down_msg"))
         # Try portal auto-discovery (rate-limited)
         if time.time() - _last_discovery_time > _DISCOVERY_COOLDOWN:
             _last_discovery_time = time.time()
@@ -1323,7 +1451,7 @@ def login_once(config, args, failure_state=None):
         else:
             discovered = config["portal_base"]
         if discovered.rstrip("/") != config["portal_base"].rstrip("/"):
-            write_log(args.log, "切换到发现的portal: {0}".format(discovered))
+            write_log(args.log, t("portal_discovered", discovered))
             config["portal_base"] = discovered
             status = get_status(config["portal_base"], allow_proxy_bypass=allow_bypass)
             if not status["reachable"]:
@@ -1335,14 +1463,14 @@ def login_once(config, args, failure_state=None):
     if failure_state is not None:
         # Notify on recovery from failures
         if failure_state["consecutive_failures"] > 0:
-            show_tray_notification("校园网已恢复", "网络连接已恢复正常")
+            show_tray_notification(t("notify_restored"), t("notify_restored_msg"))
         failure_state["consecutive_failures"] = 0
     _cache_campus_route(config["portal_base"])
 
     if status["online"]:
-        write_log(args.log, "已连接 | {0}".format(status.get("layer", "direct")))
+        write_log(args.log, t("online_status", status.get("layer", "direct")))
         return True
-    write_log(args.log, "portal可达，账号未认证，尝试登录...")
+    write_log(args.log, t("not_authenticated"))
     if args.check:
         return False
 
@@ -1384,7 +1512,7 @@ def login_once(config, args, failure_state=None):
                 time.sleep(2)
                 after = get_status(config["portal_base"], allow_proxy_bypass=allow_bypass)
                 if after["online"]:
-                    write_log(args.log, "登录成功，已上线")
+                    write_log(args.log, t("login_success"))
                     # Cache login params for fast retry on next disconnection (no password - re-derived from config)
                     _cached_login_params = {
                         "account": account,
@@ -1404,7 +1532,7 @@ def login_once(config, args, failure_state=None):
                     or result.get("result")
                     or "unknown error"
                 )
-                write_log(args.log, "登录失败: {0}".format(message))
+                write_log(args.log, t("login_failed") + ": {0}".format(message))
             if index < args.max_attempts:
                 time.sleep(args.retry_seconds)
         return False
@@ -1441,6 +1569,8 @@ def parse_args():
                         help="Log level (debug|info|warning|error). Default: info.")
     parser.add_argument("--export-logs", action="store_true",
                         help="Export all log files to a zip archive and exit.")
+    parser.add_argument("--lang", choices=["zh", "en"], default="zh",
+                        help="Interface language (zh|en). Default: zh.")
     parser.add_argument("--terminal-type", type=int, default=1, help="1 for PC,2 for mobile.")
     parser.add_argument("--tray", action="store_true", help="Run in system tray background mode.")
     parser.add_argument("--diagnose", action="store_true", help="Run portal connectivity diagnostic and exit.")
@@ -1782,7 +1912,7 @@ def disable_wifi_power_save(log_fn=None):
     if not adapter_name:
         return False
     if log_fn:
-        log_fn("禁用Wi-Fi省电模式: {0}".format(adapter_name))
+        log_fn(t("wifi_power_save_off", adapter_name))
     any_success = False
     # Disable power management via Set-NetAdapterPowerManagement (Windows 8+)
     ps_disable_pm = (
@@ -1874,29 +2004,29 @@ def reconnect_campus_wifi(campus_ssid="", log_fn=None):
         return False
     try:
         if log_fn:
-            log_fn('正在重连Wi-Fi: {0}'.format(ssid))
+            log_fn(t("wifi_reconnecting", ssid))
         result = _run_netsh_wifi_connect(ssid)
         if result.returncode == 0:
             if log_fn:
-                log_fn('Wi-Fi重连已请求: {0}'.format(ssid))
+                log_fn(t("wifi_reconnect_ok", ssid))
             return True
         err = _decode_command_output(result.stderr or result.stdout).strip()
         if _is_wifi_power_off_error(err):
             if log_fn:
-                log_fn("Wi-Fi接口已关闭，尝试启用...")
+                log_fn(t("wifi_interface_closed"))
             ensure_wifi_interface_enabled(log_fn=log_fn)
             time.sleep(3)
             result = _run_netsh_wifi_connect(ssid)
             if result.returncode == 0:
                 if log_fn:
-                    log_fn('Wi-Fi重连已请求: {0}'.format(ssid))
+                    log_fn(t("wifi_reconnect_ok", ssid))
                 return True
             err = _decode_command_output(result.stderr or result.stdout).strip()
         if log_fn:
-            log_fn('Wi-Fi重连失败: {0}'.format(err or result.returncode))
+            log_fn(t("wifi_reconnect_fail", err or result.returncode))
     except Exception as exc:
         if log_fn:
-            log_fn('Wi-Fi重连失败: {0}'.format(exc))
+            log_fn(t("wifi_reconnect_fail", exc))
     return False
 
 
@@ -1910,7 +2040,7 @@ def check_wifi_and_warn(campus_ssid, log_fn=None):
     if current.lower() == campus_ssid.lower():
         return True
     if log_fn:
-        log_fn("Wi-Fi不匹配: 当前'{0}'，校园网'{1}'".format(current, campus_ssid))
+        log_fn(t("wifi_mismatch", current, campus_ssid))
     return False
 
 
@@ -1963,7 +2093,7 @@ def boot_grace_wait(log_fn=None):
         return False
     remaining = BOOT_GRACE_SECONDS - elapsed
     if log_fn:
-        log_fn("开机初始化中，等待{0}秒网络就绪...".format(remaining))
+        log_fn(t("boot_init_waiting", remaining))
     time.sleep(remaining)
     return True
 
@@ -2026,7 +2156,7 @@ def wait_for_network_ready(portal_host="10.200.84.3", portal_port=80,
     if 0 < boot_elapsed < 300 and not _has_physical_adapter():
         timeout_seconds = max(timeout_seconds, 240)
         if log_fn:
-            log_fn("开机初始化，等待网络就绪(最多{0}秒)...".format(timeout_seconds))
+            log_fn(t("boot_init_waiting", timeout_seconds))
 
     deadline = time.time() + timeout_seconds
     consecutive_ok = 0
@@ -2039,7 +2169,7 @@ def wait_for_network_ready(portal_host="10.200.84.3", portal_port=80,
             consecutive_ok += check_interval
             if consecutive_ok >= stable_seconds:
                 if log_fn:
-                    log_fn("网络就绪")
+                    log_fn(t("network_ready"))
                 return True
         else:
             consecutive_ok = 0
@@ -2053,7 +2183,7 @@ def wait_for_network_ready(portal_host="10.200.84.3", portal_port=80,
                 # If we have a physical adapter but no Wi-Fi connection or wrong SSID
                 if physical and not current_ssid:
                     if log_fn:
-                        log_fn("检测到物理网卡但未连接Wi-Fi，尝试主动连接...")
+                        log_fn(t("wifi_no_connection"))
                     reconnect_campus_wifi(campus_ssid, log_fn=log_fn)
                     wifi_reconnect_attempted = True
                     # Wait for Wi-Fi to associate
@@ -2065,7 +2195,7 @@ def wait_for_network_ready(portal_host="10.200.84.3", portal_port=80,
                     has_internal_ip = any(_is_private_ip(ip) for ip in physical)
                     if not has_internal_ip and not dhcp_wait_attempted:
                         if log_fn:
-                            log_fn("Wi-Fi已连接({0})，等待DHCP分配IP...".format(current_ssid))
+                            log_fn(t("wifi_dhcp_wait", current_ssid))
                         dhcp_wait_attempted = True
                         # Give DHCP more time
                         time.sleep(8)
@@ -2076,7 +2206,7 @@ def wait_for_network_ready(portal_host="10.200.84.3", portal_port=80,
         time.sleep(min(check_interval, max(1, remaining)))
 
     if log_fn:
-        log_fn("网络就绪等待超时({0}秒)".format(timeout_seconds))
+        log_fn(t("network_timeout", timeout_seconds))
     return False
 
 
@@ -2645,7 +2775,7 @@ def _create_log_window():
     from tkinter.scrolledtext import ScrolledText
 
     win = tk.Toplevel(_tk_root)
-    win.title("Campus Auto Login - 日志")
+    win.title(t("log_window_title"))
     win.geometry("640x420")
     win.resizable(True, True)
 
@@ -2741,13 +2871,13 @@ def _show_network_status(icon, item):
         status = get_status(config["portal_base"], allow_proxy_bypass=False)
 
         if status["online"]:
-            show_tray_notification("网络状态", "✓ 已连接校园网\n状态：在线", icon)
+            show_tray_notification(t("menu_network_status"), t("notify_status_online"), icon)
         elif status["reachable"]:
-            show_tray_notification("网络状态", "⚠ 已连接到Portal\n状态：离线（需要登录）", icon)
+            show_tray_notification(t("menu_network_status"), t("notify_status_portal"), icon)
         else:
-            show_tray_notification("网络状态", "✗ Portal不可达\n请检查网络连接", icon)
+            show_tray_notification(t("menu_network_status"), t("notify_status_offline"), icon)
     except Exception as exc:
-        show_tray_notification("网络状态", "检测失败：{0}".format(str(exc)), icon)
+        show_tray_notification(t("menu_network_status"), t("notify_status_fail", str(exc)), icon)
 
 
 def _manual_login(icon, item):
@@ -2761,7 +2891,7 @@ def _manual_login(icon, item):
 
             status = get_status(config["portal_base"], allow_proxy_bypass=False)
             if status["online"]:
-                show_tray_notification("手动登录", "已经在线，无需登录", icon)
+                show_tray_notification(t("menu_login_now"), t("notify_login_already"), icon)
                 return
 
             # Attempt login
@@ -2769,11 +2899,11 @@ def _manual_login(icon, item):
             result = login_once(config, args, failure_state=failure_state)
 
             if result:
-                show_tray_notification("手动登录", "✓ 登录成功", icon)
+                show_tray_notification(t("menu_login_now"), t("notify_login_ok"), icon)
             else:
-                show_tray_notification("手动登录", "✗ 登录失败，请查看日志", icon)
+                show_tray_notification(t("menu_login_now"), t("notify_login_fail"), icon)
         except Exception as exc:
-            show_tray_notification("手动登录", "登录出错：{0}".format(str(exc)), icon)
+            show_tray_notification(t("menu_login_now"), t("notify_login_error", str(exc)), icon)
 
     # Run in background thread to avoid blocking UI
     threading.Thread(target=do_login, daemon=True).start()
@@ -2783,12 +2913,12 @@ def _build_menu():
     from pystray import Menu, MenuItem
     _auto_start_checked[0] = is_auto_start_enabled()
     return Menu(
-        MenuItem("网络状态", _show_network_status),
-        MenuItem("立即登录", _manual_login),
+        MenuItem(t("menu_network_status"), _show_network_status),
+        MenuItem(t("menu_login_now"), _manual_login),
         Menu.SEPARATOR,
-        MenuItem("开机自启", _toggle_auto_start, checked=lambda item: _auto_start_checked[0]),
-        MenuItem("查看日志", show_log_window, default=True),
-        MenuItem("退出", quit_app),
+        MenuItem(t("menu_auto_start"), _toggle_auto_start, checked=lambda item: _auto_start_checked[0]),
+        MenuItem(t("menu_show_log"), show_log_window, default=True),
+        MenuItem(t("menu_exit"), quit_app),
     )
 
 
@@ -2816,7 +2946,7 @@ def run_tray_mode(args):
     disable_wifi_power_save(log_fn=lambda msg: write_log(args.log, msg))
 
     tray_icon_img = create_tray_icon_image()
-    icon = pystray.Icon("campus-auto-login", tray_icon_img, "校园网自动登录", _build_menu())
+    icon = pystray.Icon("campus-auto-login", tray_icon_img, t("tray_title"), _build_menu())
 
     # Save icon reference for notifications
     global _tray_icon_instance
@@ -2830,15 +2960,13 @@ def run_tray_mode(args):
                 _run_login_loop_inner(args)
                 # Normal return means config failure or early exit - treat as needing restart
                 restart_count += 1
-                write_log(args.log, "监控线程异常退出，{0}秒后重启（{1}/{2}）".format(
-                    min(30, 5 * restart_count), restart_count, MAX_LOOP_RESTARTS))
+                write_log(args.log, t("thread_exit", min(30, 5 * restart_count), restart_count, MAX_LOOP_RESTARTS))
                 time.sleep(min(30, 5 * restart_count))
             except Exception as exc:
                 restart_count += 1
-                write_log(args.log, "监控线程崩溃（{0}），{1}秒后重启（{2}/{3}）".format(
-                    exc, min(30, 5 * restart_count), restart_count, MAX_LOOP_RESTARTS))
+                write_log(args.log, t("thread_crash", exc, min(30, 5 * restart_count), restart_count, MAX_LOOP_RESTARTS))
                 time.sleep(min(30, 5 * restart_count))
-        write_log(args.log, "监控线程重启次数过多，停止监控")
+        write_log(args.log, t("thread_max_restarts"))
 
     def _run_login_loop_inner(args):
         """Core login loop logic. Separated for crash recovery wrapper."""
@@ -2850,20 +2978,20 @@ def run_tray_mode(args):
         if args.portal_base != DEFAULT_PORTAL:
             config["portal_base"] = args.portal_base.rstrip("/")
         campus_ssid = getattr(args, "campus_ssid", "") or config.get("campus_ssid", "")
-        write_log(args.log, "已启动，监控间隔={0}s".format(args.interval))
+        write_log(args.log, t("started_monitoring", args.interval))
         # Boot grace period: wait for network to stabilize after system startup
         boot_grace_wait(log_fn=lambda msg: write_log(args.log, msg))
         # Network ready gate: wait for physical adapter, route, and TCP before probing
         portal_host = parse.urlsplit(config["portal_base"]).hostname or "10.200.84.3"
         if not wait_for_network_ready(portal_host, log_fn=lambda msg: write_log(args.log, msg), campus_ssid=campus_ssid):
-            write_log(args.log, "网络未就绪，进入正常重试")
+            write_log(args.log, t("network_not_ready"))
         # Portal auto-discovery at startup
         discovered = discover_portal_base(
             config["portal_base"], timeout=3,
             log_fn=lambda msg: write_log(args.log, msg),
         )
         if discovered.rstrip("/") != config["portal_base"].rstrip("/"):
-            write_log(args.log, "发现portal: {0}".format(discovered))
+            write_log(args.log, t("portal_discovered", discovered))
             config["portal_base"] = discovered
         failure_state = {"consecutive_failures": 0}
         FAST_INTERVAL = 10  # seconds between checks when network is down
@@ -2871,7 +2999,7 @@ def run_tray_mode(args):
             try:
                 login_once(config, args, failure_state=failure_state)
             except Exception as exc:
-                write_log(args.log, "登录异常（{0}），{1}秒后重试".format(exc, args.interval))
+                write_log(args.log, t("monitor_error", exc, args.interval))
             # Dynamic interval: fast when recovering, normal when stable
             if failure_state["consecutive_failures"] > 0:
                 sleep_time = FAST_INTERVAL
@@ -2884,7 +3012,7 @@ def run_tray_mode(args):
             time.sleep(sleep_time)
             wall_elapsed = time.time() - wall_start
             if wall_elapsed > sleep_time * 2:
-                write_log(args.log, "唤醒检测，立即检查网络")
+                write_log(args.log, t("sleep_wake_detected"))
 
     login_thread = threading.Thread(target=login_loop, daemon=True)
     login_thread.start()
@@ -2915,21 +3043,21 @@ def run_tray_mode(args):
 def _cmd_show_config_path(args):
     config_file = _find_config_file(args.config)
     if config_file:
-        print("配置文件路径: {0}".format(config_file))
+        print(t("config_show_path", config_file))
     else:
-        print("未找到配置文件")
-        print("默认搜索路径:")
-        print("  1. exe目录: {0}".format(SCRIPT_DIR))
-        print("  2. exe父目录: {0}".format(SCRIPT_DIR.parent))
-        print("  3. 当前目录: {0}".format(Path.cwd()))
-        print("  4. 用户配置目录: {0}".format(_user_data_dir()))
+        print(t("config_not_found"))
+        print(t("config_search_title"))
+        print(t("config_search_exe", SCRIPT_DIR))
+        print(t("config_search_parent", SCRIPT_DIR.parent))
+        print(t("config_search_cwd", Path.cwd()))
+        print(t("config_search_appdata", _user_data_dir()))
     return 0
 
 
 def _cmd_reset_config(args):
-    response = input("确认删除所有配置文件？(yes/no): ").strip().lower()
+    response = input(t("config_reset_confirm")).strip().lower()
     if response != "yes":
-        print("已取消")
+        print(t("config_reset_cancelled"))
         return 0
     deleted = []
     # Search all possible config locations
@@ -2941,7 +3069,7 @@ def _cmd_reset_config(args):
                     config_path.unlink()
                     deleted.append(str(config_path))
                 except Exception as e:
-                    print("删除失败 {0}: {1}".format(config_path, e))
+                    print(t("delete_failed", config_path, e))
     # Also delete route cache
     cache_file = Path("campus_route_cache.json")
     if cache_file.exists():
@@ -2951,17 +3079,17 @@ def _cmd_reset_config(args):
         except Exception:
             pass
     if deleted:
-        print("已删除:")
+        print(t("config_reset_deleted"))
         for p in deleted:
             print("  {0}".format(p))
     else:
-        print("未找到配置文件")
+        print(t("config_reset_none"))
     return 0
 
 
 def _cmd_check_wifi(args):
     ssid = get_current_wifi_ssid()
-    write_log(args.log, "当前Wi-Fi: {0}".format(ssid or "未连接"))
+    write_log(args.log, t("current_wifi", ssid or t("not_connected")))
     if args.campus_ssid:
         check_wifi_and_warn(args.campus_ssid, log_fn=lambda msg: write_log(args.log, msg))
     return 0
@@ -2970,23 +3098,23 @@ def _cmd_check_wifi(args):
 def _cmd_set_campus_ssid(args):
     ssid = get_current_wifi_ssid()
     if not ssid:
-        write_log(args.log, "未检测到Wi-Fi，请先连接校园网Wi-Fi")
+        write_log(args.log, t("wifi_not_detected"))
         return 1
-    write_log(args.log, "当前Wi-Fi: {0}".format(ssid))
-    write_log(args.log, "保存为校园网SSID:")
+    write_log(args.log, t("current_wifi", ssid))
+    write_log(args.log, t("save_ssid_hint"))
     write_log(args.log, '  campus_auto_login_cli.exe --init --campus-ssid "{0}"'.format(ssid))
     return 0
 
 
 def _cmd_force_portal_reachable(args):
-    write_log(args.log, "=== 强制portal连通模式 ===")
-    write_log(args.log, "目标portal: {0}".format(args.portal_base))
+    write_log(args.log, t("force_title"))
+    write_log(args.log, t("force_target", args.portal_base))
     ssid = get_current_wifi_ssid()
-    write_log(args.log, "当前Wi-Fi: {0}".format(ssid or "未连接"))
+    write_log(args.log, t("current_wifi", ssid or t("not_connected")))
     gw = _get_default_gateway()
-    write_log(args.log, "默认网关: {0}".format(gw or "未知"))
+    write_log(args.log, t("default_gateway", gw or t("unknown")))
     proxy_server, proxy_override = _get_proxy_details()
-    write_log(args.log, "系统代理: {0}".format(proxy_server or "未设置"))
+    write_log(args.log, t("system_proxy", proxy_server or t("not_set")))
     # Try each layer explicitly, but allow time for Wi-Fi/DHCP route recovery.
     test_url = "{0}/drcom/chkstatus?callback=_fr&jsVersion=4.X&v=1&lang=zh".format(args.portal_base.rstrip("/"))
     deadline = time.time() + 75
@@ -2999,19 +3127,19 @@ def _cmd_force_portal_reachable(args):
                 test_url, timeout=5, purpose="force",
                 allow_proxy_bypass=args.allow_temporary_proxy_bypass,
             )
-            write_log(args.log, "portal可达: {0}".format(layer))
+            write_log(args.log, t("force_reachable", layer))
             _cache_campus_route(args.portal_base)
             return 0
         except OSError as exc:
             last_error = exc
             if attempt == 1:
-                write_log(args.log, "等待网络恢复(最多75秒)...")
+                write_log(args.log, t("force_waiting"))
                 reconnect_campus_wifi(args.campus_ssid, log_fn=lambda msg: write_log(args.log, msg))
             time.sleep(5)
     try:
         raise last_error or OSError("portal unreachable")
     except OSError as exc:
-        write_log(args.log, "所有传输层失败(75秒): {0}".format(exc))
+        write_log(args.log, t("force_all_failed", exc))
         log_portal_failure_matrix(args.portal_base, log_fn=lambda msg: write_log(args.log, msg))
         return 1
 
@@ -3021,17 +3149,17 @@ def _cmd_diagnose(args):
     for line in lines:
         write_log(args.log, line)
     # Also test resilient fetch layers
-    write_log(args.log, "--- Resilient Transport Test ---")
+    write_log(args.log, t("diagnose_transport"))
     test_url = "{0}/drcom/chkstatus?callback=_diag&jsVersion=4.X&v=1&lang=zh".format(args.portal_base.rstrip("/"))
     try:
         content, layer = fetch_portal_text_resilient(
             test_url, timeout=5, purpose="diagnose",
             allow_proxy_bypass=args.allow_temporary_proxy_bypass,
         )
-        write_log(args.log, "多层传输成功: {0}".format(layer))
+        write_log(args.log, t("diagnose_ok", layer))
         _cache_campus_route(args.portal_base)
     except OSError as exc:
-        write_log(args.log, "多层传输失败: {0}".format(exc))
+        write_log(args.log, t("diagnose_fail", exc))
     # Portal auto-discovery
     discovered = discover_portal_base(
         args.portal_base, timeout=3,
@@ -3053,14 +3181,14 @@ def _cmd_once(args):
     # Network ready gate
     portal_host = parse.urlsplit(config["portal_base"]).hostname or "10.200.84.3"
     if not wait_for_network_ready(portal_host, timeout_seconds=90, log_fn=lambda msg: write_log(args.log, msg), campus_ssid=campus_ssid):
-        write_log(args.log, "网络就绪等待超时，继续尝试")
+        write_log(args.log, t("network_timeout_cont"))
     # Portal auto-discovery for --once mode
     discovered = discover_portal_base(
         config["portal_base"], timeout=3,
         log_fn=lambda msg: write_log(args.log, msg),
     )
     if discovered.rstrip("/") != config["portal_base"].rstrip("/"):
-        write_log(args.log, "发现portal: {0}".format(discovered))
+        write_log(args.log, t("portal_discovered", discovered))
         config["portal_base"] = discovered
     # Wait for portal to become ready (--once can wait longer)
     status = wait_for_portal_ready(
@@ -3070,15 +3198,15 @@ def _cmd_once(args):
         campus_ssid=campus_ssid,
     )
     if status is None:
-        write_log(args.log, "portal不可达，校园网可能未连接")
+        write_log(args.log, t("portal_timeout"))
         diagnose_portal_connectivity(config["portal_base"], log_fn=lambda msg: write_log(args.log, msg))
         log_portal_failure_matrix(config["portal_base"], log_fn=lambda msg: write_log(args.log, msg))
         return 1
     if status["online"]:
-        write_log(args.log, "已连接，无需登录")
+        write_log(args.log, t("already_connected"))
         return 0
     # Portal reachable and offline - attempt login
-    write_log(args.log, "portal可达，账号未认证，尝试登录...")
+    write_log(args.log, t("not_authenticated"))
     return 0 if login_once(config, args) else 1
 
 
@@ -3093,9 +3221,9 @@ def _run_foreground_loop(args, requested_interval):
     if requested_interval != args.interval:
         write_log(
             args.log,
-            "间隔调整: {0}秒 -> {1}秒".format(requested_interval, args.interval),
+            t("interval_adjusted", requested_interval, args.interval),
         )
-    write_log(args.log, "已启动，监控间隔={0}s".format(args.interval))
+    write_log(args.log, t("started_monitoring", args.interval))
     failure_state = {"consecutive_failures": 0}
     FAST_INTERVAL = 10
     MAX_LOOP_RESTARTS = 10
@@ -3106,7 +3234,7 @@ def _run_foreground_loop(args, requested_interval):
                 try:
                     login_once(config, args, failure_state=failure_state)
                 except Exception as exc:
-                    write_log(args.log, "登录异常（{0}），{1}秒后重试".format(exc, args.interval))
+                    write_log(args.log, t("monitor_error", exc, args.interval))
                 if failure_state["consecutive_failures"] > 0:
                     sleep_time = FAST_INTERVAL
                 else:
@@ -3115,13 +3243,12 @@ def _run_foreground_loop(args, requested_interval):
                 time.sleep(sleep_time)
                 wall_elapsed = time.time() - wall_start
                 if wall_elapsed > sleep_time * 2:
-                    write_log(args.log, "唤醒检测，立即检查网络")
+                    write_log(args.log, t("sleep_wake_detected"))
         except Exception as exc:
             restart_count += 1
-            write_log(args.log, "监控循环崩溃（{0}），{1}秒后重启（{2}/{3}）".format(
-                exc, min(30, 5 * restart_count), restart_count, MAX_LOOP_RESTARTS))
+            write_log(args.log, t("monitor_crash", exc, min(30, 5 * restart_count), restart_count, MAX_LOOP_RESTARTS))
             time.sleep(min(30, 5 * restart_count))
-    write_log(args.log, "监控循环重启次数过多，停止")
+    write_log(args.log, t("monitor_max_restarts"))
     return 0
 
 
@@ -3136,8 +3263,9 @@ def main():
             pass
 
     # Set global log level
-    global _log_level
+    global _log_level, _i18n_lang
     _log_level = args.log_level
+    _i18n_lang = args.lang
 
     # Handle --export-logs
     if args.export_logs:
@@ -3202,7 +3330,7 @@ def main():
     if args.tray:
         if not check_single_instance():
             ctypes.windll.user32.MessageBoxW(
-                0, "校园网自动登录已在运行中，请勿重复启动。", "Campus Auto Login", 0x40
+                0, t("tray_already_running"), t("tray_title"), 0x40
             )
             return 0
         run_tray_mode(args)
@@ -3215,10 +3343,10 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except KeyboardInterrupt:
-        write_log(DEFAULT_LOG, "用户停止")
+        write_log(DEFAULT_LOG, t("user_stopped"))
         raise SystemExit(130)
     except Exception as exc:
-        write_log(DEFAULT_LOG, "致命错误: {0}: {1}".format(type(exc).__name__, exc))
+        write_log(DEFAULT_LOG, t("fatal_error", type(exc).__name__, exc))
         if getattr(sys, "frozen", False):
             time.sleep(15)
         raise SystemExit(1)

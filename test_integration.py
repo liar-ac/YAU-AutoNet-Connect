@@ -224,5 +224,71 @@ class TestProxyHandling(unittest.TestCase):
             campus_auto_login.fetch_direct_text("https://10.200.84.3/test", timeout=5)
 
 
+class TestI18n(unittest.TestCase):
+    """Test the lightweight i18n framework."""
+
+    def setUp(self):
+        self._saved_lang = campus_auto_login._i18n_lang
+        campus_auto_login._i18n_lang = "zh"
+
+    def tearDown(self):
+        campus_auto_login._i18n_lang = self._saved_lang
+
+    def test_default_language_is_zh(self):
+        """Default language should be Chinese."""
+        self.assertEqual(campus_auto_login._i18n_lang, "zh")
+        self.assertIn("zh", campus_auto_login._i18n_strings["login_success"])
+
+    def test_t_returns_zh_by_default(self):
+        """t() returns Chinese when language is zh."""
+        result = campus_auto_login.t("login_success")
+        self.assertIn("登录成功", result)
+
+    def test_t_returns_en_when_switched(self):
+        """t() returns English when language is switched to en."""
+        campus_auto_login._i18n_lang = "en"
+        result = campus_auto_login.t("login_success")
+        self.assertIn("Login successful", result)
+
+    def test_t_with_format_args(self):
+        """t() supports positional format args."""
+        result = campus_auto_login.t("started_monitoring", 30)
+        self.assertIn("30", result)
+
+    def test_t_unknown_key_returns_key(self):
+        """t() gracefully returns the key itself for unknown entries."""
+        result = campus_auto_login.t("nonexistent_key_xyz")
+        self.assertEqual(result, "nonexistent_key_xyz")
+
+    def test_t_format_fallback_on_bad_args(self):
+        """t() returns the message even if format args are wrong."""
+        result = campus_auto_login.t("login_success", "extra", "args")
+        self.assertIn("登录成功", result)
+
+    def test_catalog_has_min_entries(self):
+        """The translation catalog should have a reasonable number of entries."""
+        self.assertGreaterEqual(len(campus_auto_login._i18n_strings), 80)
+
+    def test_all_entries_have_zh(self):
+        """Every catalog entry must have a 'zh' translation."""
+        for key, entry in campus_auto_login._i18n_strings.items():
+            self.assertIn("zh", entry, f"Missing 'zh' for key '{key}'")
+
+    def test_all_entries_have_en(self):
+        """Every catalog entry must have an 'en' translation."""
+        for key, entry in campus_auto_login._i18n_strings.items():
+            self.assertIn("en", entry, f"Missing 'en' for key '{key}'")
+
+    def test_language_switch_roundtrip(self):
+        """Switching language and back yields correct results."""
+        campus_auto_login._i18n_lang = "en"
+        en_result = campus_auto_login.t("login_success")
+        campus_auto_login._i18n_lang = "zh"
+        zh_result = campus_auto_login.t("login_success")
+        self.assertNotEqual(en_result, zh_result)
+        self.assertIn("Login", en_result)
+        self.assertIn("登录", zh_result)
+
+
 if __name__ == "__main__":
     unittest.main()
