@@ -1196,8 +1196,11 @@ def read_config(config_path):
         return read_powershell_config(found)
     with found.open("r", encoding="utf-8-sig") as f:
         data = json.load(f)
+    # Migrate legacy field names: "User" -> "username"
+    if data.get("User") and not data.get("username"):
+        data["username"] = data.pop("User")
     if not data.get("username") or not data.get("password_dpapi"):
-        raise ValueError("Config misses username or password_dpapi. Run: campus_auto_login_cli.exe --init")
+        raise ValueError(t("config_missing_fields"))
     data["config_format"] = "python"
     return data
 
