@@ -23,7 +23,7 @@ from urllib import parse, request
 
 DEFAULT_PORTAL = "http://10.200.84.3"
 APP_NAME = "YAU-AutoNet-Connect"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 __version__ = APP_VERSION
 
 # Legacy urllib opener kept for backward compatibility; v1.0.4 core path uses http.client direct.
@@ -649,6 +649,8 @@ MAX_INTERVAL_SECONDS = 30
 
 _log_queue = queue.Queue(maxsize=500)  # bounded to prevent unbounded growth if log window never opened
 _log_lock = threading.Lock()
+_log_level = "info"  # Global log level: debug|info|warning|error
+_LOG_LEVELS = {"debug": 0, "info": 1, "warning": 2, "error": 3}
 
 
 class DataBlob(ctypes.Structure):
@@ -737,8 +739,75 @@ def dpapi_unprotect_powershell_secure_string(hex_text):
     return dpapi_unprotect_bytes(bytes.fromhex(hex_text)).decode("utf-16le")
 
 
-def write_log(log_path, message):
-    line = "[{0}] {1}".format(time.strftime("%Y-%m-%d %H:%M:%S"), message)
+def get_timestamped_log_path(base_name="campus_auto_login_py"):
+    """Generate log filename with date: campus_auto_login_py_YYYYMMDD.log"""
+    date_str = time.strftime("%Y%m%d")
+    return SCRIPT_DIR / "{0}_{1}.log".format(base_name, date_str)
+
+
+def export_logs_to_zip():
+    """Export all log files to a zip archive for troubleshooting."""
+    import zipfile
+    import glob
+
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    zip_name = "campus_auto_login_logs_{0}.zip".format(timestamp)
+    zip_path = SCRIPT_DIR / zip_name
+
+    log_files = []
+    # Collect all log files
+    for pattern in ["*.log", "*.log.old"]:
+        log_files.extend(glob.glob(str(SCRIPT_DIR / pattern)))
+
+    # Collect config files (redacted)
+    config_files = []
+    for config_name in ["campus_login_py.config.json", "campus_login.config.json"]:
+        for base_dir in [SCRIPT_DIR, SCRIPT_DIR.parent, Path.cwd(), _user_data_dir()]:
+            config_path = base_dir / config_name
+            if config_path.exists() and str(config_path) not in config_files:
+                config_files.append(str(config_path))
+
+    if not log_files and not config_files:
+        print("未找到日志文件")
+        return None
+
+    with zipfile.ZipFile(str(zip_path), 'w', zipfile.ZIP_DEFLATED) as zf:
+        for log_file in log_files:
+            zf.write(log_file, Path(log_file).name)
+
+        # Add redacted config
+        for config_file in config_files:
+            try:
+                with open(config_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                # Redact sensitive info
+                if 'password_dpapi' in data:
+                    data['password_dpapi'] = "[REDACTED]"
+                if 'Password' in data:
+                    data['Password'] = "[REDACTED]"
+                # Write redacted config to zip
+                config_name = Path(config_file).name
+                zf.writestr("config_" + config_name, json.dumps(data, indent=2, ensure_ascii=False))
+            except Exception:
+                pass
+
+    print("日志已导出到: {0}".format(zip_path))
+    return zip_path
+
+
+def write_log(log_path, message, level="info"):
+    """Write log with level filtering. Levels: debug < info < warning < error"""
+    global _log_level
+    # Filter by level
+    if _LOG_LEVELS.get(level, 1) < _LOG_LEVELS.get(_log_level, 1):
+        return  # Skip messages below current log level
+
+    level_prefix = "[{0}]".format(level.upper()) if level != "info" else ""
+    line = "[{0}] {1}{2}".format(
+        time.strftime("%Y-%m-%d %H:%M:%S"),
+        level_prefix + " " if level_prefix else "",
+        message
+    )
     with _log_lock:
         print(line)
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -857,6 +926,63 @@ def client_info_from_status(status_raw):
     return str(ip), str(mac).replace("-", "").replace(":", "")
 
 
+def _calculate_config_checksum(config_path):
+    """Calculate SHA256 checksum of config file content (excluding checksum field)."""
+    import hashlib
+    try:
+        with config_path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        # Remove checksum field if exists
+        data_copy = data.copy()
+        data_copy.pop("_checksum", None)
+        # Calculate checksum of normalized JSON
+        content = json.dumps(data_copy, sort_keys=True, ensure_ascii=False)
+        return hashlib.sha256(content.encode('utf-8')).hexdigest()
+    except Exception:
+        return None
+
+
+def _verify_config_integrity(config_path):
+    """Verify config file integrity using embedded checksum."""
+    try:
+        with config_path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        stored_checksum = data.get("_checksum")
+        if not stored_checksum:
+            # Old config without checksum - consider valid but warn
+            return True, "no_checksum"
+        # Calculate current checksum
+        calculated = _calculate_config_checksum(config_path)
+        if calculated == stored_checksum:
+            return True, "valid"
+        else:
+            return False, "tampered"
+    except Exception as e:
+        return False, str(e)
+
+
+def _secure_config_file_permissions(config_path):
+    """Set config file permissions to current user only (Windows ACL)."""
+    if sys.platform != "win32":
+        return
+    try:
+        import subprocess
+        # Use icacls to set file permissions: remove inheritance, grant full control to current user only
+        user = os.environ.get("USERNAME", "")
+        if not user:
+            return
+        # Reset ACL: disable inheritance and grant current user full control
+        subprocess.run(
+            ["icacls", str(config_path), "/inheritance:r", "/grant:r", "{0}:F".format(user)],
+            check=False,
+            capture_output=True,
+            timeout=10,
+        )
+    except Exception:
+        # Best effort - don't fail if ACL setting fails
+        pass
+
+
 def _find_config_file(config_path):
     """Search for config in exe dir, parent dir, cwd, then %APPDATA%. Returns Path or None."""
     if config_path != DEFAULT_CONFIG:
@@ -917,6 +1043,22 @@ def read_config(config_path):
             "\nRun: campus_auto_login_cli.exe --init")
     # Auto-migrate to %APPDATA% so future runs always find it
     _maybe_migrate_config(found)
+
+    # Verify config integrity
+    is_valid, status = _verify_config_integrity(found)
+    if not is_valid:
+        # Config is corrupted/tampered - backup and warn
+        import shutil
+        import time
+        backup_name = found.name + ".corrupted." + time.strftime("%Y%m%d_%H%M%S")
+        backup_path = found.parent / backup_name
+        try:
+            shutil.copy2(str(found), str(backup_path))
+            error_msg = "配置文件完整性校验失败 ({0})。已备份到: {1}\n请运行 --reset-config 重新初始化。".format(status, backup_path)
+        except Exception:
+            error_msg = "配置文件完整性校验失败 ({0})。\n请运行 --reset-config 重新初始化。".format(status)
+        raise ValueError(error_msg)
+
     if found.name == "campus_login.config.json":
         return read_powershell_config(found)
     with found.open("r", encoding="utf-8-sig") as f:
@@ -1016,8 +1158,18 @@ def init_config(args):
     # Save to %APPDATA% so config survives exe directory changes
     save_path = _USER_CONFIG
     save_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Calculate and embed checksum for integrity protection
+    import hashlib
+    content_for_checksum = json.dumps(data, sort_keys=True, ensure_ascii=False)
+    checksum = hashlib.sha256(content_for_checksum.encode('utf-8')).hexdigest()
+    data["_checksum"] = checksum
+
     with save_path.open("w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+
+    # Secure file permissions (Windows ACL)
+    _secure_config_file_permissions(save_path)
     if _has_console_stdin():
         write_log(args.log, "Config created:{0}".format(save_path))
     else:
@@ -1136,6 +1288,9 @@ def login_once(config, args, failure_state=None):
 
         if failure_state is not None:
             failure_state["consecutive_failures"] = failure_state.get("consecutive_failures", 0) + 1
+            # Show notification on first network failure
+            if failure_state["consecutive_failures"] == 1:
+                show_tray_notification("校园网断开", "正在尝试重新连接...")
 
         write_log(args.log, "网络中断，恢复中...")
         # Immediately request Wi-Fi reconnect (always try, even without configured SSID)
@@ -1155,6 +1310,9 @@ def login_once(config, args, failure_state=None):
         write_log(args.log, "portal访问异常，尝试发现其他地址...")
         if failure_state is not None:
             failure_state["consecutive_failures"] = failure_state.get("consecutive_failures", 0) + 1
+            # Show notification on portal unreachable
+            if failure_state["consecutive_failures"] == 1:
+                show_tray_notification("校园网Portal无法访问", "检查网络连接或联系网络管理员")
         # Try portal auto-discovery (rate-limited)
         if time.time() - _last_discovery_time > _DISCOVERY_COOLDOWN:
             _last_discovery_time = time.time()
@@ -1175,6 +1333,9 @@ def login_once(config, args, failure_state=None):
 
     # Portal is reachable - reset failure counter and cache route for future repair
     if failure_state is not None:
+        # Notify on recovery from failures
+        if failure_state["consecutive_failures"] > 0:
+            show_tray_notification("校园网已恢复", "网络连接已恢复正常")
         failure_state["consecutive_failures"] = 0
     _cache_campus_route(config["portal_base"])
 
@@ -1276,6 +1437,10 @@ def parse_args():
     parser.add_argument("--portal-base", default=DEFAULT_PORTAL, help="Portal base URL.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG, help="Config path.")
     parser.add_argument("--log", type=Path, default=DEFAULT_LOG, help="Log path.")
+    parser.add_argument("--log-level", choices=["debug", "info", "warning", "error"], default="info",
+                        help="Log level (debug|info|warning|error). Default: info.")
+    parser.add_argument("--export-logs", action="store_true",
+                        help="Export all log files to a zip archive and exit.")
     parser.add_argument("--terminal-type", type=int, default=1, help="1 for PC,2 for mobile.")
     parser.add_argument("--tray", action="store_true", help="Run in system tray background mode.")
     parser.add_argument("--diagnose", action="store_true", help="Run portal connectivity diagnostic and exit.")
@@ -1286,6 +1451,10 @@ def parse_args():
     parser.add_argument("--campus-ssid", default="", help="Campus WiFi SSID for auto-reconnect.")
     parser.add_argument("--force-portal-reachable", action="store_true",
                         help="Force all transport layers to try reaching the portal.")
+    parser.add_argument("--show-config-path", action="store_true",
+                        help="Show config file path and exit.")
+    parser.add_argument("--reset-config", action="store_true",
+                        help="Delete all config files (local and user directory) and exit.")
     return parser.parse_args()
 
 
@@ -2486,6 +2655,21 @@ def _create_log_window():
     _drain_log_queue(win, text_widget)
 
 
+_tray_icon_instance = None  # Global reference to tray icon for notifications
+
+
+def show_tray_notification(title, message, icon=None):
+    """Show system tray notification bubble."""
+    global _tray_icon_instance
+    if _tray_icon_instance is None:
+        _tray_icon_instance = icon
+    if _tray_icon_instance:
+        try:
+            _tray_icon_instance.notify(title=title, message=message)
+        except Exception:
+            pass  # Notification not supported on this platform
+
+
 def show_log_window(icon=None, item=None):
     """Signal the main thread to create/show the log window."""
     _show_log_event.set()
@@ -2579,6 +2763,10 @@ def run_tray_mode(args):
     tray_icon_img = create_tray_icon_image()
     icon = pystray.Icon("campus-auto-login", tray_icon_img, "校园网自动登录", _build_menu())
 
+    # Save icon reference for notifications
+    global _tray_icon_instance
+    _tray_icon_instance = icon
+
     def login_loop():
         MAX_LOOP_RESTARTS = 10  # prevent infinite restart storms
         restart_count = 0
@@ -2666,6 +2854,74 @@ def run_tray_mode(args):
 
 def main():
     args = parse_args()
+
+    # Set UTF-8 output for Windows console
+    if sys.platform == "win32":
+        try:
+            sys.stdout.reconfigure(encoding='utf-8')
+        except Exception:
+            pass
+
+    # Set global log level
+    global _log_level
+    _log_level = args.log_level
+
+    # Handle --export-logs
+    if args.export_logs:
+        export_logs_to_zip()
+        return 0
+
+    # Use timestamped log file by default
+    if args.log == DEFAULT_LOG:
+        args.log = get_timestamped_log_path()
+
+    # Handle --show-config-path
+    if args.show_config_path:
+        config_file = _find_config_file(args.config)
+        if config_file:
+            print("配置文件路径: {0}".format(config_file))
+        else:
+            print("未找到配置文件")
+            print("默认搜索路径:")
+            print("  1. exe目录: {0}".format(SCRIPT_DIR))
+            print("  2. exe父目录: {0}".format(SCRIPT_DIR.parent))
+            print("  3. 当前目录: {0}".format(Path.cwd()))
+            print("  4. 用户配置目录: {0}".format(_user_data_dir()))
+        return 0
+
+    # Handle --reset-config
+    if args.reset_config:
+        response = input("确认删除所有配置文件？(yes/no): ").strip().lower()
+        if response != "yes":
+            print("已取消")
+            return 0
+        deleted = []
+        # Search all possible config locations
+        for config_name in ["campus_login_py.config.json", "campus_login.config.json"]:
+            for base_dir in [SCRIPT_DIR, SCRIPT_DIR.parent, Path.cwd(), _user_data_dir()]:
+                config_path = base_dir / config_name
+                if config_path.exists():
+                    try:
+                        config_path.unlink()
+                        deleted.append(str(config_path))
+                    except Exception as e:
+                        print("删除失败 {0}: {1}".format(config_path, e))
+        # Also delete route cache
+        cache_file = Path("campus_route_cache.json")
+        if cache_file.exists():
+            try:
+                cache_file.unlink()
+                deleted.append(str(cache_file))
+            except Exception:
+                pass
+        if deleted:
+            print("已删除:")
+            for p in deleted:
+                print("  {0}".format(p))
+        else:
+            print("未找到配置文件")
+        return 0
+
     requested_interval = args.interval
     args.interval = normalize_interval(args.interval)
 
@@ -2674,7 +2930,7 @@ def main():
 
     # Auto-detect first run: if no config file exists and no explicit command, trigger init
     config_file = _find_config_file(args.config)
-    if config_file is None and not args.init and not args.check and not args.diagnose and not args.check_wifi and not args.set_campus_ssid and not args.force_portal_reachable:
+    if config_file is None and not args.init and not args.check and not args.diagnose and not args.check_wifi and not args.set_campus_ssid and not args.force_portal_reachable and not args.show_config_path and not args.reset_config:
         # First run detected: trigger GUI initialization automatically
         args.init = True
         # After init, if no other action specified, default to tray mode

@@ -51,10 +51,13 @@ YAU-AutoNet-Connect 是一个面向延安大学校园网的自动登录工具，
 | Portal 自动发现 | 默认网关不可达时，自动尝试配置地址、默认地址、网关子网、NCSI 探测发现校园网认证入口 |
 | CLI 诊断版 | `campus_auto_login.exe` 支持所有命令行参数（`--diagnose`、`--check`等），便于定位代理、路由、网卡、SSID、portal可达性问题 |
 | 实时日志窗口 | 托盘右键菜单打开，实时显示运行日志 |
+| 日志增强 (v1.2.0) | 支持日志级别控制（debug/info/warning/error）、按日期分割、一键导出故障排查包 |
+| 配置管理增强 (v1.2.0) | 查看配置路径、重置配置、完整性校验、权限保护 |
+| 错误通知 (v1.2.0) | 网络中断/恢复时弹出系统托盘通知 |
 | 开机自启 | 托盘右键菜单一键切换，写入 Windows 注册表 |
 | 防重复运行 | Windows Mutex 保护，重复启动时弹窗提示 |
 | 日志自动轮转 | 超过 1MB 自动归档为 `.log.old` |
-| DPAPI 密码加密 | 仅当前 Windows 用户在本机可解密 |
+| DPAPI 密码加密 | 仅当前 Windows 用户在本机可解密，配置文件添加SHA256校验和防篡改 |
 | PowerShell 兼容 | 可自动读取 PowerShell 版生成的配置文件 |
 
 ## 系统要求
@@ -162,6 +165,14 @@ exe 和 Python 脚本均支持以下命令：
 
 # 单次检测/登录后退出（不启动托盘）
 .\campus_auto_login.exe --once
+
+# 配置管理 (v1.2.0)
+.\campus_auto_login.exe --show-config-path  # 查看配置文件路径
+.\campus_auto_login.exe --reset-config      # 删除所有配置文件
+
+# 日志管理 (v1.2.0)
+.\campus_auto_login.exe --log-level debug   # 设置日志级别（debug|info|warning|error）
+.\campus_auto_login.exe --export-logs       # 导出所有日志和配置到zip（故障排查）
 ```
 
 ### Python 脚本命令
