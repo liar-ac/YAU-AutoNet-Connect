@@ -293,19 +293,134 @@ python watch_build.py
 
 ## 故障排除
 
+### 常见问题
+
 | 问题 | 解决方法 |
 |---|---|
-| `Config not found` | 首次使用需先运行 `--init` 配置账号密码 |
-| `Portal unreachable` | 检查是否已连接校园网，网关地址是否正确 |
-| 登录失败 | 检查用户名、密码、运营商后缀是否正确 |
+| `Config not found` | 首次使用需先运行 `--init` 配置账号密码，或使用 `--show-config-path` 查看配置文件位置 |
+| `Portal unreachable` | 检查是否已连接校园网，网关地址是否正确，或使用 `--diagnose` 诊断 |
+| 登录失败 | 检查用户名、密码、运营商后缀是否正确，或查看日志文件了解详细错误 |
 | 双击 exe 无窗口 | 正常行为，程序在系统托盘运行 |
 | 托盘图标找不到 | 查看任务栏隐藏图标区域，或检查任务管理器 |
-| 提示"已在运行中" | 已有实例在运行，任务管理器结束已有进程 |
+| 提示”已在运行中” | 已有实例在运行，任务管理器结束已有进程 |
 | `--check` 显示 Offline | 确认已连接校园网，尝试运行 `--once` |
 | 开启 Clash 系统代理后提示 Portal unreachable | 先运行 `campus_auto_login.exe --force-portal-reachable --allow-temporary-proxy-bypass`。程序会优先使用 raw direct 直连，并在失败时尝试缓存源IP、网卡绑定、路由修复、PowerShell no-proxy 和临时代理旁路 |
 | `WinError 10065` | 表示 Windows 认为 `10.200.84.3` 不可路由。程序会等待路由恢复、尝试重连校园网 Wi-Fi，并输出 Failure Matrix。仍失败时请检查 WLAN 是否被硬件/飞行模式禁用 |
-| 日志出现“无线局域网接口电源关闭” | 程序会尝试启用 WLAN 接口和软件无线电后重连。若仍失败，说明 Windows 不允许软件恢复，需要手动打开 Wi-Fi 或关闭飞行模式 |
+| 日志出现”无线局域网接口电源关闭” | 程序会尝试启用 WLAN 接口和软件无线电后重连。若仍失败，说明 Windows 不允许软件恢复，需要手动打开 Wi-Fi 或关闭飞行模式 |
 | 自动发现的 portal 地址不正确 | 使用 `--portal-base http://x.x.x.x` 手动指定正确的校园网网关地址 |
+| 配置文件完整性校验失败 | 配置文件可能被篡改或损坏，程序已自动备份，请运行 `--reset-config` 重新初始化 |
+
+### 错误码对照表
+
+| 错误信息 | 含义 | 解决方法 |
+|---|---|---|
+| `WinError 10051` | 网络不可达 | 等待Wi-Fi连接完成，程序会自动等待网络就绪 |
+| `WinError 10060` | 连接超时 | portal地址不可达，检查网络连接或使用 `--diagnose` 诊断 |
+| `WinError 10061` | 连接被拒绝 | portal服务未运行，联系网络管理员 |
+| `WinError 10065` | 无路由到主机 | 路由表缺失，程序会尝试自动修复 |
+| `URLError` | 网络层错误 | 检查代理设置，尝试 `--allow-temporary-proxy-bypass` |
+| `JSONDecodeError` | portal返回非JSON | portal可能被劫持或维护中，检查浏览器访问 |
+| `result: 0` | 登录失败 | 账号密码错误，运行 `--reset-config` 重新配置 |
+| `result: -1` | 已经在线 | 无需登录，程序会自动跳过 |
+| `配置文件完整性校验失败` | 配置被篡改 | 程序已备份损坏配置，运行 `--reset-config` 重新初始化 |
+
+### 诊断命令组合
+
+#### 1. 完整诊断（推荐故障排查第一步）
+
+```powershell
+.\campus_auto_login.exe --diagnose --allow-temporary-proxy-bypass
+```
+
+输出包括：
+- portal可达性检测
+- 系统代理设置
+- 路由表检查
+- 当前Wi-Fi SSID
+- 内网IP获取状态
+- 网卡状态
+
+#### 2. 检查配置和状态
+
+```powershell
+# 查看配置文件位置
+.\campus_auto_login.exe --show-config-path
+
+# 查看当前在线状态
+.\campus_auto_login.exe --check
+
+# 查看当前Wi-Fi
+.\campus_auto_login.exe --check-wifi
+```
+
+#### 3. 测试登录（不启动托盘）
+
+```powershell
+# 单次登录测试
+.\campus_auto_login.exe --once --log-level debug
+
+# 强制验证portal可达性
+.\campus_auto_login.exe --force-portal-reachable --allow-temporary-proxy-bypass
+```
+
+#### 4. 导出日志供技术支持
+
+```powershell
+# 导出所有日志和配置（敏感信息已脱敏）
+.\campus_auto_login.exe --export-logs
+```
+
+生成的zip文件包含：
+- 所有日志文件
+- 配置文件（密码已脱敏）
+- 可直接发送给技术支持人员
+
+#### 5. 重置配置
+
+```powershell
+# 删除所有配置文件并重新初始化
+.\campus_auto_login.exe --reset-config
+```
+
+### 日志分析指南
+
+#### 日志级别说明
+
+- `[DEBUG]`：调试信息，正常运行时不显示
+- `[INFO]`：一般信息（默认级别）
+- `[WARNING]`：警告，程序可继续运行
+- `[ERROR]`：错误，操作失败
+
+#### 关键日志模式
+
+**成功登录**：
+```
+[2026-06-24 15:30:00] 已启动，监控间隔=30s
+[2026-06-24 15:30:05] 离线，开始登录...
+[2026-06-24 15:30:06] 登录成功
+[2026-06-24 15:30:07] 已连接 | direct
+```
+
+**网络中断恢复**：
+```
+[2026-06-24 15:35:00] 网络中断，恢复中...
+[2026-06-24 15:35:02] Wi-Fi已连接：YADX-STU
+[2026-06-24 15:35:05] 快速恢复成功
+```
+
+**portal不可达**：
+```
+[2026-06-24 15:40:00] portal访问异常，尝试发现其他地址...
+[2026-06-24 15:40:03] 未发现可用portal
+```
+**解决方法**：检查网络连接，或使用 `--portal-base` 手动指定
+
+**Clash代理冲突**：
+```
+[2026-06-24 15:45:00] [WARNING] 检测到系统代理，尝试直连
+[2026-06-24 15:45:01] 使用缓存IP直连成功
+```
+**正常现象**：程序已自动处理
 
 **Clash 内网直连规则示例**（适用于 TUN/虚拟网卡模式）：
 
