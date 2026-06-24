@@ -649,6 +649,11 @@ MAX_INTERVAL_SECONDS = 30
 
 _log_queue = queue.Queue(maxsize=500)  # bounded to prevent unbounded growth if log window never opened
 _log_lock = threading.Lock()
+# Mutable runtime state — these globals are read/written by multiple functions.
+# They are intentionally module-level (not in a class) because they are accessed
+# from tray threads, monitor threads, and GUI callbacks that share the same
+# process. A class-based approach would require passing references everywhere
+# and add complexity without safety benefit for this single-file application.
 _log_level = "info"  # Global log level: debug|info|warning|error
 _LOG_LEVELS = {"debug": 0, "info": 1, "warning": 2, "error": 3}
 
@@ -1354,11 +1359,13 @@ def get_status(portal_base, allow_proxy_bypass=False):
         }
 
 
+# Portal auto-discovery state (rate-limited to avoid hammering the network)
 _last_discovery_time = 0
 _DISCOVERY_COOLDOWN = 300  # 5 minutes between portal discoveries
 
 # Cached login params from last successful login (for fast retry)
-_cached_login_params = None  # dict with account, password, wlan_user_ip, wlan_user_mac, terminal_type, portal_base
+# Cached login params for fast retry on next disconnection (no password stored — re-derived from config)
+_cached_login_params = None  # dict with account, wlan_user_ip, wlan_user_mac, terminal_type, portal_base
 
 
 def login_once(config, args, failure_state=None):
@@ -1962,6 +1969,7 @@ def disable_wifi_power_save(log_fn=None):
 _ES_CONTINUOUS = 0x80000000
 _ES_SYSTEM_REQUIRED = 0x00000001
 _ES_AWAYMODE_REQUIRED = 0x00000040
+# System sleep prevention state (SetThreadExecutionState)
 _sleep_prevention_active = False
 
 
@@ -2057,6 +2065,7 @@ def normalize_interval(seconds):
 # ---------------------------------------------------------------------------
 
 BOOT_GRACE_SECONDS = 30  # brief wait after boot; wait_for_network_ready handles the rest
+# Network readiness logging state (avoid spamming logs)
 _network_ready_logged = False
 
 
@@ -2378,6 +2387,7 @@ def discover_portal_base(configured_portal_base, timeout=3, log_fn=None):
 # Diagnostic helpers
 # ---------------------------------------------------------------------------
 
+# Detailed diagnostic cooldown state
 _last_diagnose_time = 0
 _DIAGNOSE_COOLDOWN = 600  # 10 minutes between detailed diagnostics
 
