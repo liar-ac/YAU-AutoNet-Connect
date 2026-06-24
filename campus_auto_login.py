@@ -136,6 +136,28 @@ def _is_virtual_ip(ip):
     return any(ip.startswith(pfx) for pfx in _VIRTUAL_IP_PREFIXES)
 
 
+def _is_private_ip(ip):
+    """Return True if the IP is in RFC 1918 private address space.
+    10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10 (CGN)."""
+    if ip.startswith("10.") or ip.startswith("192.168."):
+        return True
+    # Check 172.16.0.0/12 (172.16.0.0 to 172.31.255.255)
+    if ip.startswith("172."):
+        try:
+            second_octet = int(ip.split(".")[1])
+            return 16 <= second_octet <= 31
+        except (ValueError, IndexError):
+            return False
+    # Check 100.64.0.0/10 (100.64.0.0 to 100.127.255.255) - Carrier-Grade NAT
+    if ip.startswith("100."):
+        try:
+            second_octet = int(ip.split(".")[1])
+            return 64 <= second_octet <= 127
+        except (ValueError, IndexError):
+            return False
+    return False
+
+
 def _run_cmd_hidden(args, timeout=15):
     """Run a command with CREATE_NO_WINDOW to avoid console flash."""
     try:
@@ -1873,11 +1895,7 @@ def wait_for_network_ready(portal_host="10.200.84.3", portal_port=80,
 
                 # If Wi-Fi is connected but no internal IP yet (DHCP pending)
                 if current_ssid and physical:
-                    has_internal_ip = any(
-                        ip.startswith("10.") or ip.startswith("172.16.") or
-                        ip.startswith("192.168.") or ip.startswith("100.64.")
-                        for ip in physical
-                    )
+                    has_internal_ip = any(_is_private_ip(ip) for ip in physical)
                     if not has_internal_ip and not dhcp_wait_attempted:
                         if log_fn:
                             log_fn("Wi-Fi已连接({0})，等待DHCP分配IP...".format(current_ssid))
@@ -2221,7 +2239,11 @@ def diagnose_portal_connectivity(portal_base, timeout=3, log_fn=None):
 
     # Warn if route source looks like virtual adapter
     src_ip = route_info.get("sourceIP") or ""
-    if src_ip.startswith("192.168.144.") or src_ip.startswith("192.168.56.") or src_ip.startswith("172.16."):
+    if src_ip and not _is_private_ip(src_ip) and not src_ip.startswith("169.254."):
+        # Public IP or unknown - could be cellular/tethered
+        lines.append("警告: Portal路由源IP为非内网地址: {0}".format(src_ip))
+    elif src_ip.startswith("192.168.144.") or src_ip.startswith("192.168.56."):
+        # Common VMware/VirtualBox ranges
         lines.append("警告: Portal路由源IP可能属于虚拟/仅主机适配器")
 
     # Virtual adapters

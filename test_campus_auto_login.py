@@ -906,5 +906,55 @@ class TestWaitForNetworkReadyEnhanced(unittest.TestCase):
             mock_reconnect.assert_not_called()
 
 
+class TestIsPrivateIP(unittest.TestCase):
+    """Test RFC 1918 private IP detection."""
+
+    def test_class_a_private_network(self):
+        """Should recognize 10.0.0.0/8 range."""
+        self.assertTrue(campus_module._is_private_ip("10.0.0.1"))
+        self.assertTrue(campus_module._is_private_ip("10.255.255.254"))
+        self.assertTrue(campus_module._is_private_ip("10.200.84.3"))
+
+    def test_class_b_private_network(self):
+        """Should recognize 172.16.0.0/12 range (172.16.0.0 to 172.31.255.255)."""
+        self.assertTrue(campus_module._is_private_ip("172.16.0.1"))
+        self.assertTrue(campus_module._is_private_ip("172.17.0.1"))
+        self.assertTrue(campus_module._is_private_ip("172.20.0.1"))
+        self.assertTrue(campus_module._is_private_ip("172.31.255.254"))
+        # Outside range
+        self.assertFalse(campus_module._is_private_ip("172.15.255.254"))
+        self.assertFalse(campus_module._is_private_ip("172.32.0.1"))
+
+    def test_class_c_private_network(self):
+        """Should recognize 192.168.0.0/16 range."""
+        self.assertTrue(campus_module._is_private_ip("192.168.0.1"))
+        self.assertTrue(campus_module._is_private_ip("192.168.255.254"))
+        self.assertTrue(campus_module._is_private_ip("192.168.1.100"))
+
+    def test_cgn_network(self):
+        """Should recognize 100.64.0.0/10 Carrier-Grade NAT range."""
+        self.assertTrue(campus_module._is_private_ip("100.64.0.1"))
+        self.assertTrue(campus_module._is_private_ip("100.127.255.254"))
+
+    def test_public_ips(self):
+        """Should reject public IPs."""
+        self.assertFalse(campus_module._is_private_ip("8.8.8.8"))
+        self.assertFalse(campus_module._is_private_ip("1.1.1.1"))
+        self.assertFalse(campus_module._is_private_ip("203.0.113.1"))
+
+    def test_link_local(self):
+        """Should reject link-local (169.254.x.x)."""
+        self.assertFalse(campus_module._is_private_ip("169.254.1.1"))
+
+    def test_loopback(self):
+        """Should reject loopback (127.x.x.x)."""
+        self.assertFalse(campus_module._is_private_ip("127.0.0.1"))
+
+    def test_invalid_ip(self):
+        """Should handle invalid IPs gracefully."""
+        self.assertFalse(campus_module._is_private_ip("not.an.ip"))
+        self.assertFalse(campus_module._is_private_ip("172.invalid.0.1"))
+
+
 if __name__ == "__main__":
     unittest.main()

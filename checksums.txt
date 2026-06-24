@@ -1,2 +1,2 @@
-6a14fba06e712359  campus_auto_login.py
-2b28ae0c54e4c108  test_campus_auto_login.py
+4c660927ee076fb2  campus_auto_login.py
+6b252f417f4cfa11  test_campus_auto_login.py
