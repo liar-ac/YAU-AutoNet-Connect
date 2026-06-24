@@ -2611,6 +2611,7 @@ _tk_root = None
 def _drain_log_queue(widget, text_widget):
     """Periodically pull log lines from the queue into the text widget."""
     global _log_drain_id
+    MAX_LOG_LINES = 1000  # Limit log window to 1000 lines to prevent memory growth
     lines_added = False
     while True:
         try:
@@ -2623,6 +2624,10 @@ def _drain_log_queue(widget, text_widget):
         except queue.Empty:
             break
     if lines_added:
+        # Trim old lines if exceeds limit
+        line_count = int(text_widget.index('end-1c').split('.')[0])
+        if line_count > MAX_LOG_LINES:
+            text_widget.delete('1.0', '{0}.0'.format(line_count - MAX_LOG_LINES))
         text_widget.configure(state="disabled")
     _log_drain_id = widget.after(200, _drain_log_queue, widget, text_widget)
 
@@ -2727,10 +2732,60 @@ def _toggle_auto_start(icon, item):
     _auto_start_checked[0] = new_state
 
 
+def _show_network_status(icon, item):
+    """Show current network status in a notification."""
+    try:
+        # Read config to get portal base
+        args = parse_args()
+        config = read_config(args.config)
+        status = get_status(config["portal_base"], allow_proxy_bypass=False)
+
+        if status["online"]:
+            show_tray_notification("网络状态", "✓ 已连接校园网\n状态：在线", icon)
+        elif status["reachable"]:
+            show_tray_notification("网络状态", "⚠ 已连接到Portal\n状态：离线（需要登录）", icon)
+        else:
+            show_tray_notification("网络状态", "✗ Portal不可达\n请检查网络连接", icon)
+    except Exception as exc:
+        show_tray_notification("网络状态", "检测失败：{0}".format(str(exc)), icon)
+
+
+def _manual_login(icon, item):
+    """Manually trigger a login attempt."""
+    import threading
+
+    def do_login():
+        try:
+            args = parse_args()
+            config = read_config(args.config)
+
+            status = get_status(config["portal_base"], allow_proxy_bypass=False)
+            if status["online"]:
+                show_tray_notification("手动登录", "已经在线，无需登录", icon)
+                return
+
+            # Attempt login
+            failure_state = {"consecutive_failures": 0}
+            result = login_once(config, args, failure_state=failure_state)
+
+            if result:
+                show_tray_notification("手动登录", "✓ 登录成功", icon)
+            else:
+                show_tray_notification("手动登录", "✗ 登录失败，请查看日志", icon)
+        except Exception as exc:
+            show_tray_notification("手动登录", "登录出错：{0}".format(str(exc)), icon)
+
+    # Run in background thread to avoid blocking UI
+    threading.Thread(target=do_login, daemon=True).start()
+
+
 def _build_menu():
     from pystray import Menu, MenuItem
     _auto_start_checked[0] = is_auto_start_enabled()
     return Menu(
+        MenuItem("网络状态", _show_network_status),
+        MenuItem("立即登录", _manual_login),
+        Menu.SEPARATOR,
         MenuItem("开机自启", _toggle_auto_start, checked=lambda item: _auto_start_checked[0]),
         MenuItem("查看日志", show_log_window, default=True),
         MenuItem("退出", quit_app),
