@@ -49,7 +49,7 @@ YAU-AutoNet-Connect 是一个面向延安大学校园网的自动登录工具，
 | Clash 系统代理兼容 | raw direct、缓存源IP、网卡绑定、路由修复、PowerShell no-proxy、临时代理旁路多层兜底，系统代理开启时仍优先直连校园网网关 |
 | Wi-Fi 自动恢复 | 认证退出后出现 Windows 路由丢失或 WLAN 软件无线电关闭时，自动尝试启用 WLAN 并重连校园网 SSID |
 | Portal 自动发现 | 默认网关不可达时，自动尝试配置地址、默认地址、网关子网、NCSI 探测发现校园网认证入口 |
-| CLI 诊断版 | `campus_auto_login_cli.exe`提供实时命令行输出，便于定位代理、路由、网卡、SSID、portal可达性问题 |
+| CLI 诊断版 | `campus_auto_login.exe` 支持所有命令行参数（`--diagnose`、`--check`等），便于定位代理、路由、网卡、SSID、portal可达性问题 |
 | 实时日志窗口 | 托盘右键菜单打开，实时显示运行日志 |
 | 开机自启 | 托盘右键菜单一键切换，写入 Windows 注册表 |
 | 防重复运行 | Windows Mutex 保护，重复启动时弹窗提示 |
@@ -69,42 +69,29 @@ YAU-AutoNet-Connect 是一个面向延安大学校园网的自动登录工具，
 
 ## 快速开始
 
-> **首次下载后不能直接登录校园网，必须先运行初始化命令配置账号密码。**
+> **v1.1.0 重大改进：首次双击自动弹出配置窗口，无需手动初始化命令！**
 
 ### 第一步：下载
 
-从 [Releases](https://github.com/liar-ac/YAU-AutoNet-Connect/releases) 下载：
+从 [Releases](https://github.com/liar-ac/YAU-AutoNet-Connect/releases) 下载 `campus_auto_login.exe`，放到**纯英文路径**下，例如 `D:\tools\YAU-AutoNet-Connect\`。
 
-| 文件 | 用途 |
-|---|---|
-| `campus_auto_login.exe` | 日常使用，双击后台静默运行 |
-| `campus_auto_login_cli.exe` | 首次初始化、诊断、排障（命令行版） |
+### 第二步：首次运行自动配置
 
-两个 exe 放到同一个**纯英文路径**下，例如 `D:\tools\YAU-AutoNet-Connect\`。
-
-### 第二步：初始化配置（仅首次）
-
-在 exe 所在目录打开 PowerShell，运行：
-
-```powershell
-.\campus_auto_login_cli.exe --init
-```
-
-> **必须使用 `campus_auto_login_cli.exe`（命令行版）进行初始化。** `campus_auto_login.exe` 是后台托盘版，没有命令行交互能力。
-
-按提示依次输入：
+**直接双击 `campus_auto_login.exe`**，程序会自动检测到首次运行，弹出配置窗口：
 
 | 提示 | 说明 |
 |---|---|
-| `Campus username` | 校园网用户名 |
-| `Campus password` | 校园网密码（输入时不可见） |
-| `Service suffix` | 运营商后缀：直接回车为默认，`@dx` 电信，`@lt` 联通 |
+| 校园网用户名 | 输入你的校园网账号 |
+| 校园网密码 | 输入密码（不可见） |
+| 运营商后缀 | 直接回车为默认，`@dx` 电信，`@lt` 联通 |
 
-> 密码使用 Windows DPAPI 加密，配置文件生成在 exe 所在目录，不同用户的密码互不影响。
+配置完成后，程序自动进入系统托盘后台运行。
 
-### 第三步：开始使用
+> 密码使用 Windows DPAPI 加密存储，配置文件生成在 exe 所在目录。
 
-配置完成后，以后直接**双击 `campus_auto_login.exe`** 即可。程序自动进入系统托盘后台运行。
+### 第三步：以后使用
+
+配置一次后，以后直接**双击 `campus_auto_login.exe`** 即可，自动进入系统托盘后台运行。
 
 ---
 
@@ -120,7 +107,7 @@ YAU-AutoNet-Connect 是一个面向延安大学校园网的自动登录工具，
 
 程序运行时会自动检测网络状态：在线时跳过，离线时尝试登录。日志超过 1MB 会自动归档为 `.log.old`。
 
-> **v1.0.9 说明：** 双击 exe 后仍在系统托盘静默运行，不需要长期打开终端窗口。v1.0.9 修复了开机自启动时因Wi-Fi未连接导致超时180秒的问题，新增主动Wi-Fi连接检测和DHCP等待逻辑。
+> **v1.1.0 说明：** 首次运行自动弹出GUI配置窗口，配置完成后自动进入托盘。无需再下载cli版本或手动执行初始化命令。v1.0.9已修复开机自启动超时问题，增加主动Wi-Fi连接检测。
 
 ---
 
@@ -144,22 +131,22 @@ exe 和 Python 脚本均支持以下命令：
 .\campus_auto_login.exe --once
 
 # 命令行实时输出版，推荐用于排障
-.\campus_auto_login_cli.exe --once --allow-temporary-proxy-bypass
+.\campus_auto_login.exe --once --allow-temporary-proxy-bypass
 
 # 强制验证校园网网关可达性
-.\campus_auto_login_cli.exe --force-portal-reachable --allow-temporary-proxy-bypass
+.\campus_auto_login.exe --force-portal-reachable --allow-temporary-proxy-bypass
 
 # 输出详细连通性诊断
-.\campus_auto_login_cli.exe --diagnose --allow-temporary-proxy-bypass
+.\campus_auto_login.exe --diagnose --allow-temporary-proxy-bypass
 
 # 查看当前 Wi-Fi SSID
-.\campus_auto_login_cli.exe --check-wifi
+.\campus_auto_login.exe --check-wifi
 
 # 保存当前 Wi-Fi 为校园网 SSID
-.\campus_auto_login_cli.exe --set-campus-ssid
+.\campus_auto_login.exe --set-campus-ssid
 
 # 显式指定校园网 SSID，用于自动重连
-.\campus_auto_login_cli.exe --once --campus-ssid "YADX-STU"
+.\campus_auto_login.exe --once --campus-ssid "YADX-STU"
 
 # 以指定间隔持续监控（5-30 秒）
 .\campus_auto_login.exe --interval 30
@@ -234,15 +221,13 @@ pip install -r requirements-dev.txt
 pip install -r requirements-dev.txt
 python -m pytest test_campus_auto_login.py -q
 pyinstaller campus_auto_login.spec
-pyinstaller campus_auto_login_cli.spec
 ```
 
 打包产物在 `dist/`：
 
 | 文件 | 用途 |
 |---|---|
-| `campus_auto_login.exe` | 托盘后台版，适合日常双击运行 |
-| `campus_auto_login_cli.exe` | 命令行诊断版，适合 `--once`、`--diagnose`、`--force-portal-reachable` |
+| `campus_auto_login.exe` | 单文件exe，支持托盘、GUI配置、所有命令行参数 |
 
 如需监听代码变更自动重新打包：
 
@@ -306,7 +291,7 @@ python watch_build.py
 | 托盘图标找不到 | 查看任务栏隐藏图标区域，或检查任务管理器 |
 | 提示"已在运行中" | 已有实例在运行，任务管理器结束已有进程 |
 | `--check` 显示 Offline | 确认已连接校园网，尝试运行 `--once` |
-| 开启 Clash 系统代理后提示 Portal unreachable | 先运行 `campus_auto_login_cli.exe --force-portal-reachable --allow-temporary-proxy-bypass`。程序会优先使用 raw direct 直连，并在失败时尝试缓存源IP、网卡绑定、路由修复、PowerShell no-proxy 和临时代理旁路 |
+| 开启 Clash 系统代理后提示 Portal unreachable | 先运行 `campus_auto_login.exe --force-portal-reachable --allow-temporary-proxy-bypass`。程序会优先使用 raw direct 直连，并在失败时尝试缓存源IP、网卡绑定、路由修复、PowerShell no-proxy 和临时代理旁路 |
 | `WinError 10065` | 表示 Windows 认为 `10.200.84.3` 不可路由。程序会等待路由恢复、尝试重连校园网 Wi-Fi，并输出 Failure Matrix。仍失败时请检查 WLAN 是否被硬件/飞行模式禁用 |
 | 日志出现“无线局域网接口电源关闭” | 程序会尝试启用 WLAN 接口和软件无线电后重连。若仍失败，说明 Windows 不允许软件恢复，需要手动打开 Wi-Fi 或关闭飞行模式 |
 | 自动发现的 portal 地址不正确 | 使用 `--portal-base http://x.x.x.x` 手动指定正确的校园网网关地址 |

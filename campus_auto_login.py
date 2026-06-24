@@ -23,7 +23,7 @@ from urllib import parse, request
 
 DEFAULT_PORTAL = "http://10.200.84.3"
 APP_NAME = "YAU-AutoNet-Connect"
-APP_VERSION = "1.0.9"
+APP_VERSION = "1.1.0"
 __version__ = APP_VERSION
 
 # Legacy urllib opener kept for backward compatibility; v1.0.4 core path uses http.client direct.
@@ -2674,6 +2674,15 @@ def main():
 
     # Ensure portal hosts bypass any system proxy at the process level
     ensure_process_proxy_bypass_for_portal()
+
+    # Auto-detect first run: if no config file exists and no explicit command, trigger init
+    config_file = _find_config_file(args.config)
+    if config_file is None and not args.init and not args.check and not args.diagnose and not args.check_wifi and not args.set_campus_ssid and not args.force_portal_reachable:
+        # First run detected: trigger GUI initialization automatically
+        args.init = True
+        # After init, if no other action specified, default to tray mode
+        if not args.once and not args.tray:
+            args.tray = True
 
     if args.init:
         init_result = init_config(args)
