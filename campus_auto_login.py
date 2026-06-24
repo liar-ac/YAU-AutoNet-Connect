@@ -2963,7 +2963,7 @@ def run_tray_mode(args):
     _tray_icon_instance = icon
 
     def login_loop():
-        MAX_LOOP_RESTARTS = 10  # prevent infinite restart storms
+        MAX_LOOP_RESTARTS = 1000  # prevent infinite restart storms
         restart_count = 0
         while restart_count < MAX_LOOP_RESTARTS:
             try:
@@ -3236,7 +3236,7 @@ def _run_foreground_loop(args, requested_interval):
     write_log(args.log, t("started_monitoring", args.interval))
     failure_state = {"consecutive_failures": 0}
     FAST_INTERVAL = 10
-    MAX_LOOP_RESTARTS = 10
+    MAX_LOOP_RESTARTS = 1000
     restart_count = 0
     while restart_count < MAX_LOOP_RESTARTS:
         try:
