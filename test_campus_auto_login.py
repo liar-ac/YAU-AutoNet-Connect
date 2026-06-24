@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Lightweight tests for campus_auto_login (no network required)."""
 import os
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -798,6 +799,111 @@ class TestFindConfigFile(unittest.TestCase):
                 result = campus_module.read_config(campus_module.DEFAULT_CONFIG)
                 self.assertEqual(result["username"], "test")
                 self.assertEqual(result["config_format"], "powershell")
+
+
+class TestWaitForNetworkReadyEnhanced(unittest.TestCase):
+    """Test enhanced boot-time network ready logic with proactive Wi-Fi reconnection."""
+
+    def test_triggers_wifi_reconnect_on_boot_when_adapter_exists_but_no_wifi(self):
+        """Should trigger Wi-Fi reconnect when physical adapter exists but no SSID detected."""
+        with patch("campus_auto_login.network_ready", side_effect=[False, False, True]), \
+             patch("campus_auto_login._seconds_since_boot", return_value=60), \
+             patch("campus_auto_login._has_physical_adapter", return_value=True), \
+             patch("campus_auto_login._get_physical_adapter_ips", return_value=[
+                 ("192.168.1.100", 10, "WLAN", "Wi-Fi Adapter", False)
+             ]), \
+             patch("campus_auto_login.get_current_wifi_ssid", return_value=""), \
+             patch("campus_auto_login.reconnect_campus_wifi", return_value=True) as mock_reconnect:
+            result = campus_module.wait_for_network_ready(
+                portal_host="10.200.84.3",
+                timeout_seconds=30,
+                check_interval=1,
+                stable_seconds=1,
+                campus_ssid="YADX-STU"
+            )
+            self.assertTrue(result)
+            mock_reconnect.assert_called_once()
+
+    def test_waits_for_dhcp_when_wifi_connected_but_no_internal_ip(self):
+        """Should wait for DHCP when Wi-Fi is connected but no internal IP yet."""
+        with patch("campus_auto_login.network_ready", side_effect=[False, False, True]), \
+             patch("campus_auto_login._seconds_since_boot", return_value=60), \
+             patch("campus_auto_login._has_physical_adapter", return_value=True), \
+             patch("campus_auto_login._get_physical_adapter_ips", side_effect=[
+                 [("169.254.1.100", 10, "WLAN", "Wi-Fi Adapter", False)],  # APIPA, no DHCP yet
+                 [("10.200.100.50", 10, "WLAN", "Wi-Fi Adapter", False)]   # Got internal IP
+             ]), \
+             patch("campus_auto_login.get_current_wifi_ssid", return_value="YADX-STU"), \
+             patch("campus_auto_login.reconnect_campus_wifi") as mock_reconnect:
+            result = campus_module.wait_for_network_ready(
+                portal_host="10.200.84.3",
+                timeout_seconds=30,
+                check_interval=1,
+                stable_seconds=1,
+                campus_ssid="YADX-STU"
+            )
+            self.assertTrue(result)
+            # Should not trigger reconnect since Wi-Fi is already connected
+            mock_reconnect.assert_not_called()
+
+    def test_extends_timeout_to_240s_on_boot_without_adapter(self):
+        """Should extend timeout to 240 seconds when booting without physical adapter."""
+        with patch("campus_auto_login.network_ready", side_effect=[False] * 10 + [True]), \
+             patch("campus_auto_login._seconds_since_boot", return_value=60), \
+             patch("campus_auto_login._has_physical_adapter", return_value=False), \
+             patch("campus_auto_login._get_physical_adapter_ips", return_value=[]), \
+             patch("campus_auto_login.get_current_wifi_ssid", return_value=""), \
+             patch("campus_auto_login.reconnect_campus_wifi"):
+            start = time.time()
+            result = campus_module.wait_for_network_ready(
+                portal_host="10.200.84.3",
+                timeout_seconds=10,  # Will be extended to 240s
+                check_interval=1,
+                stable_seconds=1
+            )
+            elapsed = time.time() - start
+            self.assertTrue(result)
+            # Should have extended timeout (not fail at 10s)
+            self.assertLess(elapsed, 20)  # But succeeded early
+
+    def test_does_not_trigger_reconnect_outside_boot_window(self):
+        """Should not trigger proactive Wi-Fi reconnect after boot window expires."""
+        with patch("campus_auto_login.network_ready", side_effect=[False, True]), \
+             patch("campus_auto_login._seconds_since_boot", return_value=400), \
+             patch("campus_auto_login._get_physical_adapter_ips", return_value=[
+                 ("192.168.1.100", 10, "WLAN", "Wi-Fi Adapter", False)
+             ]), \
+             patch("campus_auto_login.get_current_wifi_ssid", return_value=""), \
+             patch("campus_auto_login.reconnect_campus_wifi") as mock_reconnect:
+            result = campus_module.wait_for_network_ready(
+                portal_host="10.200.84.3",
+                timeout_seconds=10,
+                check_interval=1,
+                stable_seconds=1
+            )
+            self.assertTrue(result)
+            # Should not reconnect outside boot window (>300s since boot)
+            mock_reconnect.assert_not_called()
+
+    def test_skips_reconnect_when_wifi_already_connected(self):
+        """Should skip Wi-Fi reconnect when already connected to correct SSID."""
+        with patch("campus_auto_login.network_ready", side_effect=[False, True]), \
+             patch("campus_auto_login._seconds_since_boot", return_value=60), \
+             patch("campus_auto_login._get_physical_adapter_ips", return_value=[
+                 ("10.200.100.50", 10, "WLAN", "Wi-Fi Adapter", False)
+             ]), \
+             patch("campus_auto_login.get_current_wifi_ssid", return_value="YADX-STU"), \
+             patch("campus_auto_login.reconnect_campus_wifi") as mock_reconnect:
+            result = campus_module.wait_for_network_ready(
+                portal_host="10.200.84.3",
+                timeout_seconds=10,
+                check_interval=1,
+                stable_seconds=1,
+                campus_ssid="YADX-STU"
+            )
+            self.assertTrue(result)
+            # Already connected with internal IP, no need to reconnect
+            mock_reconnect.assert_not_called()
 
 
 if __name__ == "__main__":

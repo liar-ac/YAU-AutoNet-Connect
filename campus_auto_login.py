@@ -23,7 +23,7 @@ from urllib import parse, request
 
 DEFAULT_PORTAL = "http://10.200.84.3"
 APP_NAME = "YAU-AutoNet-Connect"
-APP_VERSION = "1.0.8"
+APP_VERSION = "1.0.9"
 __version__ = APP_VERSION
 
 # Legacy urllib opener kept for backward compatibility; v1.0.4 core path uses http.client direct.
@@ -1827,20 +1827,23 @@ def _has_physical_adapter():
 
 def wait_for_network_ready(portal_host="10.200.84.3", portal_port=80,
                            timeout_seconds=120, check_interval=3,
-                           stable_seconds=5, log_fn=None):
+                           stable_seconds=5, log_fn=None, campus_ssid=""):
     """Wait until network_ready() returns True for consecutive stable_seconds.
     Extends timeout automatically if system recently booted and no adapter detected.
+    Proactively triggers Wi-Fi reconnection if disconnected during boot.
     Returns True if stable, False if timeout."""
-    # Auto-extend timeout for cold boot scenarios
+    # Auto-extend timeout for cold boot scenarios (240s instead of 180s for extra safety)
     boot_elapsed = _seconds_since_boot()
     if 0 < boot_elapsed < 300 and not _has_physical_adapter():
-        timeout_seconds = max(timeout_seconds, 180)
+        timeout_seconds = max(timeout_seconds, 240)
         if log_fn:
             log_fn("开机初始化，等待网络就绪(最多{0}秒)...".format(timeout_seconds))
 
     deadline = time.time() + timeout_seconds
     consecutive_ok = 0
     first_pass = True
+    wifi_reconnect_attempted = False
+    dhcp_wait_attempted = False
 
     while time.time() < deadline:
         if network_ready(portal_host, portal_port, log_fn=log_fn if first_pass else None):
@@ -1851,6 +1854,38 @@ def wait_for_network_ready(portal_host="10.200.84.3", portal_port=80,
                 return True
         else:
             consecutive_ok = 0
+
+            # Proactive Wi-Fi reconnection on boot if we have physical adapter but portal unreachable
+            if not wifi_reconnect_attempted and boot_elapsed > 0 and boot_elapsed < 300:
+                adapters = _get_physical_adapter_ips()
+                physical = [ip for ip, _, _, _, virt in adapters if not virt]
+                current_ssid = get_current_wifi_ssid()
+
+                # If we have a physical adapter but no Wi-Fi connection or wrong SSID
+                if physical and not current_ssid:
+                    if log_fn:
+                        log_fn("检测到物理网卡但未连接Wi-Fi，尝试主动连接...")
+                    reconnect_campus_wifi(campus_ssid, log_fn=log_fn)
+                    wifi_reconnect_attempted = True
+                    # Wait for Wi-Fi to associate
+                    time.sleep(5)
+                    continue
+
+                # If Wi-Fi is connected but no internal IP yet (DHCP pending)
+                if current_ssid and physical:
+                    has_internal_ip = any(
+                        ip.startswith("10.") or ip.startswith("172.16.") or
+                        ip.startswith("192.168.") or ip.startswith("100.64.")
+                        for ip in physical
+                    )
+                    if not has_internal_ip and not dhcp_wait_attempted:
+                        if log_fn:
+                            log_fn("Wi-Fi已连接({0})，等待DHCP分配IP...".format(current_ssid))
+                        dhcp_wait_attempted = True
+                        # Give DHCP more time
+                        time.sleep(8)
+                        continue
+
         first_pass = False
         remaining = deadline - time.time()
         time.sleep(min(check_interval, max(1, remaining)))
@@ -2552,12 +2587,13 @@ def run_tray_mode(args):
             return
         if args.portal_base != DEFAULT_PORTAL:
             config["portal_base"] = args.portal_base.rstrip("/")
+        campus_ssid = getattr(args, "campus_ssid", "") or config.get("campus_ssid", "")
         write_log(args.log, "已启动，监控间隔={0}s".format(args.interval))
         # Boot grace period: wait for network to stabilize after system startup
         boot_grace_wait(log_fn=lambda msg: write_log(args.log, msg))
         # Network ready gate: wait for physical adapter, route, and TCP before probing
         portal_host = parse.urlsplit(config["portal_base"]).hostname or "10.200.84.3"
-        if not wait_for_network_ready(portal_host, log_fn=lambda msg: write_log(args.log, msg)):
+        if not wait_for_network_ready(portal_host, log_fn=lambda msg: write_log(args.log, msg), campus_ssid=campus_ssid):
             write_log(args.log, "网络未就绪，进入正常重试")
         # Portal auto-discovery at startup
         discovered = discover_portal_base(
@@ -2716,7 +2752,7 @@ def main():
         boot_grace_wait(log_fn=lambda msg: write_log(args.log, msg))
         # Network ready gate
         portal_host = parse.urlsplit(config["portal_base"]).hostname or "10.200.84.3"
-        if not wait_for_network_ready(portal_host, timeout_seconds=90, log_fn=lambda msg: write_log(args.log, msg)):
+        if not wait_for_network_ready(portal_host, timeout_seconds=90, log_fn=lambda msg: write_log(args.log, msg), campus_ssid=campus_ssid):
             write_log(args.log, "网络就绪等待超时，继续尝试")
         # Portal auto-discovery for --once mode
         discovered = discover_portal_base(

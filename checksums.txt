@@ -1,2 +1,2 @@
-e786cc055fc01a3ac2cfb7ec4ce9e429f12b3439f59246136d883f7caecaab78  campus_auto_login.exe
-dcb528006a94290e389cdc6207873d9ee1c6c33064626ddd1fb223fe77eb86f7  campus_auto_login_cli.exe
+6a14fba06e712359  campus_auto_login.py
+2b28ae0c54e4c108  test_campus_auto_login.py
