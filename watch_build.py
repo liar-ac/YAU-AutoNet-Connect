@@ -25,7 +25,7 @@ class RebuildHandler(FileSystemEventHandler):
         if now - self._last_trigger < DEBOUNCE_SEC:
             return
         self._last_trigger = now
-        print(f"\n[watch_build] Change detected, rebuilding exe ...", flush=True)
+        print("\n[watch_build] Change detected, rebuilding exe ...", flush=True)
         ret = subprocess.run(
             [sys.executable, "-m", "PyInstaller", "--clean", str(SPEC)],
             cwd=str(SCRIPT_DIR),

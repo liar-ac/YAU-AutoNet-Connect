@@ -393,7 +393,7 @@ class TestDiscoverPortalBase(unittest.TestCase):
         mock_test.side_effect = [False, False, False, True]
         mock_raw.side_effect = OSError("fail")
         mock_gw.return_value = "10.211.223.1"
-        result = discover_portal_base("http://10.200.84.3", timeout=1)
+        discover_portal_base("http://10.200.84.3", timeout=1)
         # Should have tried multiple candidates
         self.assertTrue(mock_test.call_count > 1)
 

@@ -3335,12 +3335,19 @@ def run_tray_mode(args):
     _tk_root.withdraw()
 
     def check_show_log():
-        if _show_log_event.is_set():
-            _show_log_event.clear()
-            _create_log_window()
-        if _switch_account_event.is_set():
-            _switch_account_event.clear()
-            _run_switch_account(args)
+        try:
+            if _show_log_event.is_set():
+                _show_log_event.clear()
+                _create_log_window()
+            if _switch_account_event.is_set():
+                _switch_account_event.clear()
+                _run_switch_account(args)
+        except Exception as exc:
+            try:
+                write_log(args.log, "托盘界面操作异常:{0}: {1}".format(type(exc).__name__, exc))
+            except Exception:
+                pass
+        # Always reschedule so a one-off UI error never stops the poll loop.
         _tk_root.after(200, check_show_log)
 
     _tk_root.after(200, check_show_log)
