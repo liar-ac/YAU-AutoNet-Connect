@@ -23,7 +23,7 @@ from urllib import parse, request
 
 DEFAULT_PORTAL = "http://10.200.84.3"
 APP_NAME = "YAU-AutoNet-Connect"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.2.1"
 __version__ = APP_VERSION
 
 # Legacy urllib opener kept for backward compatibility; v1.0.4 core path uses http.client direct.
@@ -769,6 +769,18 @@ _i18n_strings = {
     "user_stopped":           {"zh": "用户停止", "en": "User stopped"},
     "fatal_error":            {"zh": "致命错误: {0}: {1}", "en": "Fatal error: {0}: {1}"},
     "delete_failed":          {"zh": "删除失败 {0}: {1}", "en": "Delete failed {0}: {1}"},
+    # Credential / config errors
+    "config_missing_fields":  {"zh": "配置缺少用户名或密码字段", "en": "Config missing username or password field"},
+    "credential_decrypt_failed": {"zh": "凭据解密失败({0})，配置可能损坏或由其他用户/设备创建，请运行 --reset-config 后重新 --init", "en": "Credential decryption failed ({0}); config may be corrupt or created by another user/device. Run --reset-config then --init."},
+    "notify_credential_fail_title": {"zh": "校园网登录: 配置无效", "en": "Campus login: invalid config"},
+    "notify_credential_fail_msg": {"zh": "保存的账号密码无法解密，请重新初始化配置", "en": "Saved credentials cannot be decrypted; please re-initialize."},
+    # Wi-Fi interface power
+    "wifi_interface_closed":  {"zh": "无线局域网接口电源关闭，尝试启用WLAN...", "en": "WLAN interface powered off, trying to enable..."},
+    # Auto-start
+    "autostart_enabled":      {"zh": "已启用开机自启: {0}", "en": "Auto-start enabled: {0}"},
+    "autostart_path_fixed":   {"zh": "开机自启路径已更新为当前程序: {0}", "en": "Auto-start path updated to current exe: {0}"},
+    "autostart_failed":       {"zh": "开机自启设置失败: {0}", "en": "Auto-start setup failed: {0}"},
+    "autostart_disabled_taskmgr": {"zh": "开机自启已被任务管理器禁用，请在 任务管理器→启动 中重新启用", "en": "Auto-start is disabled in Task Manager; re-enable it under Task Manager > Startup."},
 }
 
 
@@ -870,6 +882,42 @@ def dpapi_unprotect(encoded):
 
 def dpapi_unprotect_powershell_secure_string(hex_text):
     return dpapi_unprotect_bytes(bytes.fromhex(hex_text)).decode("utf-16le")
+
+
+# Throttle credential-decryption error reporting so a permanently broken config
+# (e.g. created on another machine/user) does not spam the log every cycle.
+_last_credential_error_time = 0
+_CREDENTIAL_ERROR_COOLDOWN = 300  # seconds between credential-error log/notify
+
+
+def _decrypt_config_password(config):
+    """Return the plaintext password from config, or raise with a clear cause.
+
+    Centralizes the dpapi / PowerShell-secure-string branching so callers can
+    handle decryption failure uniformly instead of leaking a raw WinError 87
+    (which is what CryptUnprotectData returns for any invalid/foreign blob).
+    """
+    if config.get("password_dpapi"):
+        return dpapi_unprotect(config["password_dpapi"])
+    if config.get("password_ps_hex"):
+        return dpapi_unprotect_powershell_secure_string(config["password_ps_hex"])
+    raise ValueError("Config has no supported password field.")
+
+
+def _report_credential_error(args, failure_state, exc):
+    """Surface a credential-decryption failure clearly, without crashing the
+    monitor loop. Logs an actionable message and shows a one-off tray notice,
+    throttled so a permanently invalid config does not flood the log."""
+    global _last_credential_error_time
+    now = time.time()
+    if now - _last_credential_error_time >= _CREDENTIAL_ERROR_COOLDOWN:
+        _last_credential_error_time = now
+        write_log(args.log, t("credential_decrypt_failed", exc), level="error")
+        show_tray_notification(
+            t("notify_credential_fail_title"), t("notify_credential_fail_msg")
+        )
+    if failure_state is not None:
+        failure_state["consecutive_failures"] = failure_state.get("consecutive_failures", 0) + 1
 
 
 def get_timestamped_log_path(base_name="campus_auto_login_py"):
@@ -1173,7 +1221,7 @@ def read_config(config_path):
         ]
         raise FileNotFoundError(
             "Config not found. Searched:\n  " + "\n  ".join(searched) +
-            "\nRun: campus_auto_login_cli.exe --init")
+            "\nRun: campus_auto_login.exe --init")
     # Auto-migrate to %APPDATA% so future runs always find it
     _maybe_migrate_config(found)
 
@@ -1241,7 +1289,7 @@ def _init_config_gui():
             with log_path.open("a", encoding="utf-8") as f:
                 f.write("[{0}] GUI init failed: {1}\n".format(
                     time.strftime("%Y-%m-%d %H:%M:%S"), exc))
-                f.write("Please use campus_auto_login_cli.exe --init instead.\n")
+                f.write("Please use campus_auto_login.exe --init instead.\n")
         except Exception:
             pass
         return None
@@ -1386,12 +1434,7 @@ def login_once(config, args, failure_state=None):
             try:
                 cached = _cached_login_params
                 # Re-derive password from config (not from cache, for security)
-                if config.get("password_dpapi"):
-                    fast_password = dpapi_unprotect(config["password_dpapi"])
-                elif config.get("password_ps_hex"):
-                    fast_password = dpapi_unprotect_powershell_secure_string(config["password_ps_hex"])
-                else:
-                    fast_password = None
+                fast_password = _decrypt_config_password(config)
                 if fast_password:
                     fast_params = [
                         ("login_method", "1"),
@@ -1484,12 +1527,11 @@ def login_once(config, args, failure_state=None):
     if args.check:
         return False
 
-    if config.get("password_dpapi"):
-        password = dpapi_unprotect(config["password_dpapi"])
-    elif config.get("password_ps_hex"):
-        password = dpapi_unprotect_powershell_secure_string(config["password_ps_hex"])
-    else:
-        raise ValueError("Config has no supported password field.")
+    try:
+        password = _decrypt_config_password(config)
+    except Exception as exc:
+        _report_credential_error(args, failure_state, exc)
+        return False
     raw_account = "{0}{1}".format(config["username"], config.get("service_suffix", ""))
     terminal_type = int(config.get("terminal_type", 1))
     account = account_prefix(terminal_type) + raw_account
@@ -2836,6 +2878,8 @@ def quit_app(icon, item):
 
 _REG_RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 _REG_VALUE_NAME = "CampusAutoLogin"
+_REG_APP_KEY = r"Software\YAU-AutoNet-Connect"
+_REG_STARTUP_APPROVED = r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"
 
 
 def _exe_path():
@@ -2844,26 +2888,99 @@ def _exe_path():
     return str(Path(__file__).resolve())
 
 
-def is_auto_start_enabled():
+def _autostart_command():
+    """The exact Run-value command string for the current executable."""
+    return '"{0}" --tray'.format(_exe_path())
+
+
+def _read_autostart_entry():
+    """Return the raw Run-value string for our entry, or None if absent."""
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _REG_RUN_KEY, 0, winreg.KEY_READ) as key:
             val, _ = winreg.QueryValueEx(key, _REG_VALUE_NAME)
-            # val 格式: '"C:\path\exe" --tray'，需要提取 exe 路径部分
-            exe_in_reg = val.strip().split('"')[1] if '"' in val else val.split()[0]
-            return Path(exe_in_reg).resolve() == Path(_exe_path()).resolve()
-    except (OSError, IndexError, ValueError):
+            return val
+    except (OSError, ValueError):
+        return None
+
+
+def is_auto_start_enabled():
+    """True only if a Run entry exists AND points at the current executable."""
+    val = _read_autostart_entry()
+    if not val:
+        return False
+    try:
+        # val 格式: '"C:\\path\\exe" --tray'，提取 exe 路径部分再比较
+        exe_in_reg = val.strip().split('"')[1] if '"' in val else val.split()[0]
+        return Path(exe_in_reg).resolve() == Path(_exe_path()).resolve()
+    except (IndexError, ValueError, OSError):
         return False
 
 
 def set_auto_start(enable):
     with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _REG_RUN_KEY, 0, winreg.KEY_SET_VALUE) as key:
         if enable:
-            winreg.SetValueEx(key, _REG_VALUE_NAME, 0, winreg.REG_SZ, '"{}" --tray'.format(_exe_path()))
+            winreg.SetValueEx(key, _REG_VALUE_NAME, 0, winreg.REG_SZ, _autostart_command())
         else:
             try:
                 winreg.DeleteValue(key, _REG_VALUE_NAME)
             except FileNotFoundError:
                 pass
+
+
+def _get_autostart_optout():
+    """True if the user explicitly turned auto-start OFF via the tray menu.
+    Persisted under our own registry key so ensure_auto_start_healthy() will
+    not keep re-enabling something the user deliberately disabled."""
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _REG_APP_KEY, 0, winreg.KEY_READ) as key:
+            val, _ = winreg.QueryValueEx(key, "AutoStartOptOut")
+            return bool(val)
+    except (OSError, ValueError):
+        return False
+
+
+def _set_autostart_optout(optout):
+    try:
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, _REG_APP_KEY) as key:
+            winreg.SetValueEx(key, "AutoStartOptOut", 0, winreg.REG_DWORD, 1 if optout else 0)
+    except OSError:
+        pass
+
+
+def _is_startup_approved_disabled():
+    """True if our Run entry exists but has been disabled in Task Manager >
+    Startup. Windows stores a 12-byte blob there; an odd first byte == disabled."""
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _REG_STARTUP_APPROVED, 0, winreg.KEY_READ) as key:
+            val, _ = winreg.QueryValueEx(key, _REG_VALUE_NAME)
+            blob = bytes(val)
+            return bool(blob) and bool(blob[0] & 1)
+    except (OSError, ValueError):
+        return False
+
+
+def ensure_auto_start_healthy(log_fn=None):
+    """Guarantee auto-start is registered and points at the current exe, unless
+    the user opted out. Self-heals a stale path (exe moved or rebuilt to a new
+    location) and warns when Windows has disabled the entry. Only acts for the
+    frozen exe so running from source / tests never touches the registry."""
+    if not getattr(sys, "frozen", False):
+        return
+    if _get_autostart_optout():
+        return
+    desired = _autostart_command()
+    existing = _read_autostart_entry()
+    if existing != desired:
+        try:
+            set_auto_start(True)
+            if log_fn:
+                log_fn(t("autostart_path_fixed", _exe_path()) if existing
+                       else t("autostart_enabled", _exe_path()))
+        except OSError as exc:
+            if log_fn:
+                log_fn(t("autostart_failed", exc))
+    if _is_startup_approved_disabled() and log_fn:
+        log_fn(t("autostart_disabled_taskmgr"))
 
 
 _auto_start_checked = [False]
@@ -2872,6 +2989,8 @@ _auto_start_checked = [False]
 def _toggle_auto_start(icon, item):
     new_state = not is_auto_start_enabled()
     set_auto_start(new_state)
+    # Remember an explicit OFF so ensure_auto_start_healthy() won't re-enable it.
+    _set_autostart_optout(not new_state)
     _auto_start_checked[0] = new_state
 
 
@@ -2957,6 +3076,10 @@ def run_tray_mode(args):
 
     # Disable Wi-Fi adapter power saving to stay connected during lock screen
     disable_wifi_power_save(log_fn=lambda msg: write_log(args.log, msg))
+
+    # Ensure auto-start is registered and points at THIS exe (self-heals a moved
+    # or rebuilt exe). Respects an explicit user opt-out from the tray menu.
+    ensure_auto_start_healthy(log_fn=lambda msg: write_log(args.log, msg))
 
     tray_icon_img = create_tray_icon_image()
     icon = pystray.Icon("campus-auto-login", tray_icon_img, t("tray_title"), _build_menu())
@@ -3115,7 +3238,7 @@ def _cmd_set_campus_ssid(args):
         return 1
     write_log(args.log, t("current_wifi", ssid))
     write_log(args.log, t("save_ssid_hint"))
-    write_log(args.log, '  campus_auto_login_cli.exe --init --campus-ssid "{0}"'.format(ssid))
+    write_log(args.log, '  campus_auto_login.exe --init --campus-ssid "{0}"'.format(ssid))
     return 0
 
 

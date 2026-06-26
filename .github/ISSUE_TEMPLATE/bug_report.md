@@ -38,8 +38,8 @@ labels: bug
 请优先运行：
 
 ```powershell
-.\campus_auto_login_cli.exe --force-portal-reachable --allow-temporary-proxy-bypass
-.\campus_auto_login_cli.exe --once --allow-temporary-proxy-bypass
+.\campus_auto_login.exe --force-portal-reachable --allow-temporary-proxy-bypass
+.\campus_auto_login.exe --once --allow-temporary-proxy-bypass
 ```
 
 粘贴完整输出，尤其是 `Failure Matrix` 片段。

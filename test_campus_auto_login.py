@@ -956,5 +956,149 @@ class TestIsPrivateIP(unittest.TestCase):
         self.assertFalse(campus_module._is_private_ip("172.invalid.0.1"))
 
 
+class TestCredentialDecryptionHandling(unittest.TestCase):
+    """A corrupt/foreign credential blob must NOT crash the monitor loop with a
+    raw WinError 87 — login_once should fail gracefully with a clear message."""
+
+    def setUp(self):
+        self._saved = campus_module._last_credential_error_time
+        campus_module._last_credential_error_time = 0  # reset throttle
+
+    def tearDown(self):
+        campus_module._last_credential_error_time = self._saved
+
+    @patch("campus_auto_login.show_tray_notification")
+    @patch("campus_auto_login._cache_campus_route")
+    @patch("campus_auto_login.write_log")
+    @patch("campus_auto_login.get_status")
+    @patch("campus_auto_login._decrypt_config_password",
+           side_effect=OSError("[WinError 87] 参数错误。"))
+    def test_corrupt_credential_returns_false_no_raise(
+        self, mock_decrypt, mock_status, mock_log, mock_cache, mock_notify
+    ):
+        mock_status.return_value = {
+            "state": "offline", "reachable": True, "online": False,
+            "raw": {}, "error": None, "layer": "raw_direct",
+        }
+        args = MagicMock()
+        args.log = MagicMock()
+        args.check = False
+        args.max_attempts = 1
+        config = {"portal_base": "http://10.200.84.3", "username": "u",
+                  "password_dpapi": "invalid", "service_suffix": "", "terminal_type": 1}
+        failure_state = {"consecutive_failures": 0}
+        result = login_once(config, args, failure_state=failure_state)  # must not raise
+        self.assertFalse(result)
+        messages = [c[0][1] for c in mock_log.call_args_list]
+        self.assertTrue(any("凭据解密失败" in m or "decryption failed" in m.lower()
+                            for m in messages))
+        mock_notify.assert_called()
+        self.assertEqual(failure_state["consecutive_failures"], 1)
+
+    @patch("campus_auto_login.show_tray_notification")
+    @patch("campus_auto_login._cache_campus_route")
+    @patch("campus_auto_login.write_log")
+    @patch("campus_auto_login.get_status")
+    @patch("campus_auto_login._decrypt_config_password", side_effect=OSError("[WinError 87]"))
+    def test_credential_error_is_throttled(
+        self, mock_decrypt, mock_status, mock_log, mock_cache, mock_notify
+    ):
+        mock_status.return_value = {
+            "state": "offline", "reachable": True, "online": False,
+            "raw": {}, "error": None, "layer": "raw_direct",
+        }
+        args = MagicMock(); args.log = MagicMock(); args.check = False; args.max_attempts = 1
+        config = {"portal_base": "http://10.200.84.3", "username": "u", "password_dpapi": "x"}
+        for _ in range(3):
+            login_once(config, args, failure_state={"consecutive_failures": 0})
+        self.assertEqual(mock_notify.call_count, 1)  # throttled to one notice
+
+    @patch("campus_auto_login.invoke_url_jsonp")
+    @patch("campus_auto_login._cache_campus_route")
+    @patch("campus_auto_login.write_log")
+    @patch("campus_auto_login.get_status")
+    @patch("campus_auto_login._decrypt_config_password", return_value="realpw")
+    def test_valid_credential_proceeds_to_login(
+        self, mock_decrypt, mock_status, mock_log, mock_cache, mock_invoke
+    ):
+        mock_status.side_effect = [
+            {"state": "offline", "reachable": True, "online": False,
+             "raw": {"v4ip": "10.1.2.3", "ss4": "aabbccddeeff"},
+             "error": None, "layer": "raw_direct"},
+            {"state": "online", "reachable": True, "online": True,
+             "raw": {}, "error": None, "layer": "raw_direct"},
+        ]
+        mock_invoke.return_value = {"result": 1}
+        args = MagicMock(); args.log = MagicMock(); args.check = False
+        args.max_attempts = 1; args.retry_seconds = 0
+        config = {"portal_base": "http://10.200.84.3", "username": "u",
+                  "password_dpapi": "x", "service_suffix": "", "terminal_type": 1}
+        with patch("campus_auto_login.time.sleep"):
+            result = login_once(config, args, failure_state={"consecutive_failures": 0})
+        self.assertTrue(result)
+        mock_invoke.assert_called_once()
+
+
+class TestAutoStartRobustness(unittest.TestCase):
+    """Auto-start must self-register / self-heal for the frozen exe and respect
+    an explicit user opt-out; running from source must never touch the registry."""
+
+    def test_optout_roundtrip(self):
+        original = campus_module._get_autostart_optout()
+        try:
+            campus_module._set_autostart_optout(True)
+            self.assertTrue(campus_module._get_autostart_optout())
+            campus_module._set_autostart_optout(False)
+            self.assertFalse(campus_module._get_autostart_optout())
+        finally:
+            campus_module._set_autostart_optout(original)
+
+    def test_autostart_command_quotes_path(self):
+        cmd = campus_module._autostart_command()
+        self.assertTrue(cmd.startswith('"'))
+        self.assertTrue(cmd.endswith('--tray'))
+
+    @patch("campus_auto_login._is_startup_approved_disabled", return_value=False)
+    @patch("campus_auto_login.set_auto_start")
+    @patch("campus_auto_login._read_autostart_entry", return_value=None)
+    @patch("campus_auto_login._get_autostart_optout", return_value=False)
+    def test_healthy_enables_when_missing(self, m_opt, m_read, m_set, m_sa):
+        with patch.object(campus_module.sys, "frozen", True, create=True):
+            campus_module.ensure_auto_start_healthy()
+        m_set.assert_called_once_with(True)
+
+    @patch("campus_auto_login._is_startup_approved_disabled", return_value=False)
+    @patch("campus_auto_login.set_auto_start")
+    @patch("campus_auto_login._read_autostart_entry", return_value='"C:\\old\\campus.exe" --tray')
+    @patch("campus_auto_login._get_autostart_optout", return_value=False)
+    def test_healthy_fixes_stale_path(self, m_opt, m_read, m_set, m_sa):
+        with patch.object(campus_module.sys, "frozen", True, create=True):
+            campus_module.ensure_auto_start_healthy()
+        m_set.assert_called_once_with(True)
+
+    @patch("campus_auto_login._is_startup_approved_disabled", return_value=False)
+    @patch("campus_auto_login.set_auto_start")
+    @patch("campus_auto_login._read_autostart_entry")
+    @patch("campus_auto_login._get_autostart_optout", return_value=False)
+    def test_healthy_no_rewrite_when_current(self, m_opt, m_read, m_set, m_sa):
+        with patch.object(campus_module.sys, "frozen", True, create=True):
+            m_read.return_value = campus_module._autostart_command()
+            campus_module.ensure_auto_start_healthy()
+        m_set.assert_not_called()
+
+    @patch("campus_auto_login.set_auto_start")
+    @patch("campus_auto_login._get_autostart_optout", return_value=True)
+    def test_healthy_respects_optout(self, m_opt, m_set):
+        with patch.object(campus_module.sys, "frozen", True, create=True):
+            campus_module.ensure_auto_start_healthy()
+        m_set.assert_not_called()
+
+    @patch("campus_auto_login.set_auto_start")
+    def test_healthy_noop_when_not_frozen(self, m_set):
+        # sys.frozen is False under pytest -> must not touch the registry
+        campus_module.ensure_auto_start_healthy()
+        m_set.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

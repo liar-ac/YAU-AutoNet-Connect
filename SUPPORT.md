@@ -5,8 +5,8 @@
 遇到无法登录或portal不可达时，请优先使用命令行诊断版：
 
 ```powershell
-.\campus_auto_login_cli.exe --force-portal-reachable --allow-temporary-proxy-bypass
-.\campus_auto_login_cli.exe --once --allow-temporary-proxy-bypass
+.\campus_auto_login.exe --force-portal-reachable --allow-temporary-proxy-bypass
+.\campus_auto_login.exe --once --allow-temporary-proxy-bypass
 ```
 
 如果问题发生在后台托盘模式，请同时提供`campus_auto_login_py.log`中相关时间段的日志。
