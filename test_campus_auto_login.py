@@ -1100,5 +1100,48 @@ class TestAutoStartRobustness(unittest.TestCase):
         m_set.assert_not_called()
 
 
+class TestEventDrivenDetection(unittest.TestCase):
+    """Event-driven network-change wakeup must interrupt the poll wait so the
+    monitor reacts to drops/reconnects in ~1s instead of a full interval."""
+
+    def setUp(self):
+        campus_module._network_change_event.clear()
+
+    def tearDown(self):
+        campus_module._network_change_event.clear()
+        campus_module._network_watcher_stop.set()  # stop any watcher started here
+
+    def test_interruptible_sleep_times_out_without_event(self):
+        import time as _t
+        t0 = _t.time()
+        woke = campus_module.interruptible_sleep(0.25)
+        self.assertFalse(woke)
+        self.assertGreaterEqual(_t.time() - t0, 0.2)
+
+    def test_interruptible_sleep_returns_early_on_event(self):
+        import time as _t
+        campus_module._network_change_event.set()
+        t0 = _t.time()
+        woke = campus_module.interruptible_sleep(10)
+        self.assertTrue(woke)
+        self.assertLess(_t.time() - t0, 1.0)            # did not wait the full 10s
+        self.assertFalse(campus_module._network_change_event.is_set())  # auto-cleared
+
+    def test_interruptible_sleep_logs_when_woken(self):
+        campus_module._network_change_event.set()
+        msgs = []
+        campus_module.interruptible_sleep(5, log_fn=msgs.append)
+        self.assertTrue(any("网络变化" in m or "Network change" in m for m in msgs))
+
+    def test_start_network_watcher_idempotent(self):
+        campus_module._network_watcher_stop.clear()
+        campus_module.start_network_watcher()
+        t1 = campus_module._network_watcher_thread
+        campus_module.start_network_watcher()
+        t2 = campus_module._network_watcher_thread
+        self.assertIs(t1, t2)            # same thread, not restarted
+        self.assertTrue(t1.is_alive())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -29,6 +29,10 @@ _EXCLUDES = [
     'logging.config', 'logging.handlers',
     'distutils', 'setuptools', 'pkg_resources',
     'multiprocessing', 'concurrent',
+    # additional unused stdlib (safe — not imported by the app or its deps)
+    'sqlite3', 'lib2to3', 'pydoc_data', 'http.server',
+    'pdb', 'profile', 'cProfile', 'pstats', 'tabnanny',
+    'turtle', 'turtledemo', 'curses', 'ensurepip', 'venv',
 ]
 
 a = Analysis(
@@ -42,7 +46,7 @@ a = Analysis(
     runtime_hooks=[],
     excludes=_EXCLUDES,
     noarchive=False,
-    optimize=0,
+    optimize=2,
 )
 pyz = PYZ(a.pure)
 

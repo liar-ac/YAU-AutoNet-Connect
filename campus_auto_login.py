@@ -23,7 +23,7 @@ from urllib import parse, request
 
 DEFAULT_PORTAL = "http://10.200.84.3"
 APP_NAME = "YAU-AutoNet-Connect"
-APP_VERSION = "1.2.1"
+APP_VERSION = "1.3.0"
 __version__ = APP_VERSION
 
 # Legacy urllib opener kept for backward compatibility; v1.0.4 core path uses http.client direct.
@@ -731,7 +731,9 @@ _i18n_strings = {
     "thread_exit":            {"zh": "监控线程异常退出，{0}秒后重启（{1}/{2}）", "en": "Monitor thread exited, restarting in {0}s ({1}/{2})"},
     "thread_crash":           {"zh": "监控线程崩溃（{0}），{1}秒后重启（{2}/{3}）", "en": "Monitor thread crashed ({0}), restarting in {1}s ({2}/{3})"},
     "thread_max_restarts":    {"zh": "监控线程重启次数过多，停止监控", "en": "Too many thread restarts, stopping"},
+    "monitor_slow_retry":     {"zh": "已多次重启，转入慢速守护(每{0}秒重试一次，不会放弃)", "en": "Many restarts; entering slow guard mode (retry every {0}s, never gives up)"},
     "sleep_wake_detected":    {"zh": "唤醒检测，立即检查网络", "en": "Wake detected, checking network immediately"},
+    "net_change_detected":    {"zh": "检测到网络变化，立即检查", "en": "Network change detected, checking immediately"},
     # Tray
     "tray_already_running":   {"zh": "校园网自动登录已在运行中，请勿重复启动。", "en": "Campus Auto Login is already running."},
     "tray_title":             {"zh": "校园网自动登录", "en": "Campus Auto Login"},
@@ -2106,6 +2108,78 @@ def normalize_interval(seconds):
 
 
 # ---------------------------------------------------------------------------
+# Event-driven network change detection (instant drop/reconnect reaction)
+# ---------------------------------------------------------------------------
+# A watcher thread blocks on the OS until the IP address table changes
+# (Wi-Fi drop/reconnect, DHCP lease, link up/down) and sets an Event so the
+# monitor loop reacts within ~1s instead of waiting a full poll interval.
+# Pure ctypes (iphlpapi) — no admin rights, no extra dependency. If anything
+# fails the watcher exits quietly and the loop falls back to plain polling.
+_network_change_event = threading.Event()
+_network_watcher_stop = threading.Event()
+_network_watcher_thread = None
+
+
+def _network_change_watcher():
+    class _OVERLAPPED(ctypes.Structure):
+        _fields_ = [
+            ("Internal", ctypes.c_void_p), ("InternalHigh", ctypes.c_void_p),
+            ("Offset", wintypes.DWORD), ("OffsetHigh", wintypes.DWORD),
+            ("hEvent", wintypes.HANDLE),
+        ]
+    try:
+        iphlpapi = ctypes.windll.iphlpapi
+        kernel32 = ctypes.windll.kernel32
+        kernel32.CreateEventW.restype = wintypes.HANDLE
+    except Exception:
+        return
+    ERROR_IO_PENDING = 997
+    WAIT_OBJECT_0 = 0
+    while not _network_watcher_stop.is_set():
+        handle = wintypes.HANDLE()
+        overlapped = _OVERLAPPED()
+        overlapped.hEvent = kernel32.CreateEventW(None, True, False, None)
+        if not overlapped.hEvent:
+            time.sleep(5)
+            continue
+        try:
+            ret = iphlpapi.NotifyAddrChange(ctypes.byref(handle), ctypes.byref(overlapped))
+            if ret != ERROR_IO_PENDING:
+                time.sleep(5)
+                continue
+            # Wait for a change, polling the stop flag each second for clean exit.
+            while not _network_watcher_stop.is_set():
+                if kernel32.WaitForSingleObject(overlapped.hEvent, 1000) == WAIT_OBJECT_0:
+                    _network_change_event.set()
+                    break
+        finally:
+            kernel32.CloseHandle(overlapped.hEvent)
+        time.sleep(1)  # debounce the burst of events emitted during a reconnect
+
+
+def start_network_watcher():
+    """Start the network-change watcher thread once (idempotent)."""
+    global _network_watcher_thread
+    if _network_watcher_thread is not None and _network_watcher_thread.is_alive():
+        return
+    _network_watcher_stop.clear()
+    _network_watcher_thread = threading.Thread(
+        target=_network_change_watcher, daemon=True, name="net-change-watcher")
+    _network_watcher_thread.start()
+
+
+def interruptible_sleep(seconds, log_fn=None):
+    """Sleep up to `seconds`, returning early if the OS signals a network change.
+    Returns True if woken early by a network-change event, False on timeout."""
+    woke = _network_change_event.wait(timeout=seconds)
+    if woke:
+        _network_change_event.clear()
+        if log_fn:
+            log_fn(t("net_change_detected"))
+    return woke
+
+
+# ---------------------------------------------------------------------------
 # Boot grace period & network readiness gate
 # ---------------------------------------------------------------------------
 
@@ -3089,9 +3163,10 @@ def run_tray_mode(args):
     _tray_icon_instance = icon
 
     def login_loop():
-        MAX_LOOP_RESTARTS = 10  # prevent infinite restart storms
+        MAX_LOOP_RESTARTS = 10  # cap RAPID restarts before backing off
+        SLOW_RETRY = 60         # after the cap, keep guarding at this slow cadence
         restart_count = 0
-        while restart_count < MAX_LOOP_RESTARTS:
+        while True:
             try:
                 _run_login_loop_inner(args)
                 # Normal return means config failure or early exit - treat as needing restart
@@ -3102,7 +3177,11 @@ def run_tray_mode(args):
                 restart_count += 1
                 write_log(args.log, t("thread_crash", exc, min(30, 5 * restart_count), restart_count, MAX_LOOP_RESTARTS))
                 time.sleep(min(30, 5 * restart_count))
-        write_log(args.log, t("thread_max_restarts"))
+            if restart_count >= MAX_LOOP_RESTARTS:
+                # Never give up: slow down and keep guarding so the tool always recovers.
+                write_log(args.log, t("monitor_slow_retry", SLOW_RETRY))
+                time.sleep(SLOW_RETRY)
+                restart_count = 0
 
     def _run_login_loop_inner(args):
         """Core login loop logic. Separated for crash recovery wrapper."""
@@ -3141,15 +3220,16 @@ def run_tray_mode(args):
                 sleep_time = FAST_INTERVAL
             else:
                 sleep_time = args.interval
-            # Sleep with wake-from-sleep detection:
-            # If wall-clock jumps more than interval*2, system just woke from sleep.
-            # In that case, skip remaining sleep and check immediately.
+            # Wait up to sleep_time, but wake instantly on an OS network change
+            # (Wi-Fi drop/reconnect/DHCP); wake-from-system-sleep detection kept.
             wall_start = time.time()
-            time.sleep(sleep_time)
+            interruptible_sleep(sleep_time, log_fn=lambda msg: write_log(args.log, msg))
             wall_elapsed = time.time() - wall_start
             if wall_elapsed > sleep_time * 2:
                 write_log(args.log, t("sleep_wake_detected"))
 
+    # Start event-driven network watcher so drops/reconnects are noticed in ~1s.
+    start_network_watcher()
     login_thread = threading.Thread(target=login_loop, daemon=True)
     login_thread.start()
 
@@ -3354,6 +3434,9 @@ def _run_foreground_loop(args, requested_interval):
     # Disable Wi-Fi power saving for non-tray mode too
     disable_wifi_power_save(log_fn=lambda msg: write_log(args.log, msg))
 
+    # Event-driven network watcher: react to drops/reconnects in ~1s
+    start_network_watcher()
+
     if requested_interval != args.interval:
         write_log(
             args.log,
@@ -3363,8 +3446,9 @@ def _run_foreground_loop(args, requested_interval):
     failure_state = {"consecutive_failures": 0}
     FAST_INTERVAL = 10
     MAX_LOOP_RESTARTS = 10
+    SLOW_RETRY = 60
     restart_count = 0
-    while restart_count < MAX_LOOP_RESTARTS:
+    while True:
         try:
             while True:
                 try:
@@ -3376,7 +3460,7 @@ def _run_foreground_loop(args, requested_interval):
                 else:
                     sleep_time = args.interval
                 wall_start = time.time()
-                time.sleep(sleep_time)
+                interruptible_sleep(sleep_time, log_fn=lambda msg: write_log(args.log, msg))
                 wall_elapsed = time.time() - wall_start
                 if wall_elapsed > sleep_time * 2:
                     write_log(args.log, t("sleep_wake_detected"))
@@ -3384,8 +3468,11 @@ def _run_foreground_loop(args, requested_interval):
             restart_count += 1
             write_log(args.log, t("monitor_crash", exc, min(30, 5 * restart_count), restart_count, MAX_LOOP_RESTARTS))
             time.sleep(min(30, 5 * restart_count))
-    write_log(args.log, t("monitor_max_restarts"))
-    return 0
+            if restart_count >= MAX_LOOP_RESTARTS:
+                # Never give up: slow down and keep guarding the connection.
+                write_log(args.log, t("monitor_slow_retry", SLOW_RETRY))
+                time.sleep(SLOW_RETRY)
+                restart_count = 0
 
 
 def main():
