@@ -1143,5 +1143,63 @@ class TestEventDrivenDetection(unittest.TestCase):
         self.assertTrue(t1.is_alive())
 
 
+class TestSwitchAccount(unittest.TestCase):
+    """切换账号: saving new credentials must produce a valid, re-readable config
+    and reset cached login state so the next cycle uses the new account."""
+
+    def setUp(self):
+        self._saved_cache = campus_module._cached_login_params
+        campus_module._switch_account_event.clear()
+        campus_module._config_reload_event.clear()
+
+    def tearDown(self):
+        campus_module._cached_login_params = self._saved_cache
+        campus_module._switch_account_event.clear()
+        campus_module._config_reload_event.clear()
+
+    def test_switch_callback_only_signals_main_thread(self):
+        campus_module._switch_account_event.clear()
+        campus_module._switch_account(None, None)  # tray-thread callback
+        self.assertTrue(campus_module._switch_account_event.is_set())
+
+    def test_saved_config_round_trips_and_resets_cache(self):
+        import tempfile, json
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as td:
+            cfg = Path(td) / "campus_login_py.config.json"
+            campus_module._cached_login_params = {"stale": True}
+            with patch.object(campus_module, "_USER_CONFIG", cfg), \
+                 patch("campus_auto_login.dpapi_protect", return_value="ENCBLOB"), \
+                 patch("campus_auto_login._secure_config_file_permissions"):
+                saved = campus_module._save_switched_config(
+                    "newuser", "newpass", "@dx", "http://10.200.84.3", 1, cfg)
+            self.assertEqual(saved, cfg)
+            self.assertIsNone(campus_module._cached_login_params)  # cache reset
+            data = json.loads(cfg.read_text(encoding="utf-8"))
+            self.assertEqual(data["username"], "newuser")
+            self.assertEqual(data["password_dpapi"], "ENCBLOB")
+            self.assertEqual(data["service_suffix"], "@dx")
+            self.assertEqual(data["portal_base"], "http://10.200.84.3")
+            self.assertIn("_checksum", data)
+            # read_config must accept it (integrity valid + required fields present)
+            with patch.object(campus_module, "_maybe_migrate_config", lambda *a, **k: None):
+                back = campus_module.read_config(cfg)
+            self.assertEqual(back["username"], "newuser")
+            self.assertEqual(back["config_format"], "python")
+
+    def test_saved_config_strips_trailing_slash_on_portal(self):
+        import tempfile, json
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as td:
+            cfg = Path(td) / "campus_login_py.config.json"
+            with patch.object(campus_module, "_USER_CONFIG", cfg), \
+                 patch("campus_auto_login.dpapi_protect", return_value="X"), \
+                 patch("campus_auto_login._secure_config_file_permissions"):
+                campus_module._save_switched_config(
+                    "u", "p", "", "http://10.200.84.3/", 1, cfg)
+            data = json.loads(cfg.read_text(encoding="utf-8"))
+            self.assertEqual(data["portal_base"], "http://10.200.84.3")
+
+
 if __name__ == "__main__":
     unittest.main()

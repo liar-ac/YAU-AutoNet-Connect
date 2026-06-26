@@ -23,7 +23,7 @@ from urllib import parse, request
 
 DEFAULT_PORTAL = "http://10.200.84.3"
 APP_NAME = "YAU-AutoNet-Connect"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.4.0"
 __version__ = APP_VERSION
 
 # Legacy urllib opener kept for backward compatibility; v1.0.4 core path uses http.client direct.
@@ -739,9 +739,15 @@ _i18n_strings = {
     "tray_title":             {"zh": "校园网自动登录", "en": "Campus Auto Login"},
     "menu_network_status":    {"zh": "网络状态", "en": "Network Status"},
     "menu_login_now":         {"zh": "立即登录", "en": "Login Now"},
+    "menu_switch_account":    {"zh": "切换账号", "en": "Switch Account"},
     "menu_auto_start":        {"zh": "开机自启", "en": "Auto-start"},
     "menu_show_log":          {"zh": "查看日志", "en": "Show Log"},
     "menu_exit":              {"zh": "退出", "en": "Exit"},
+    "switch_title":           {"zh": "切换账号", "en": "Switch Account"},
+    "switch_saved":           {"zh": "已切换账号: {0}，正在用新账号登录...", "en": "Account switched: {0}, logging in..."},
+    "switch_failed":          {"zh": "切换账号失败: {0}", "en": "Switch account failed: {0}"},
+    "switch_done_msg":        {"zh": "已切换到账号:\n{0}\n\n正在用新账号登录。", "en": "Switched to account:\n{0}\n\nLogging in with the new account."},
+    "account_reloaded":       {"zh": "检测到账号已切换，重新加载配置", "en": "Account switched, config reloaded"},
     "notify_reconnecting":    {"zh": "校园网断开", "en": "Campus disconnected"},
     "notify_reconnect_msg":   {"zh": "正在尝试重新连接...", "en": "Attempting to reconnect..."},
     "notify_portal_down":     {"zh": "校园网Portal无法访问", "en": "Campus portal unreachable"},
@@ -2864,6 +2870,8 @@ def create_tray_icon_image():
 _log_window = None  # (toplevel, text_widget)
 _log_drain_id = None
 _show_log_event = threading.Event()
+_switch_account_event = threading.Event()  # tray -> main thread: open switch-account dialog
+_config_reload_event = threading.Event()   # main thread -> login loop: re-read config
 _tk_root = None
 
 
@@ -3115,12 +3123,87 @@ def _manual_login(icon, item):
     threading.Thread(target=do_login, daemon=True).start()
 
 
+def _switch_account(icon, item):
+    """Tray callback: signal the main thread to open the switch-account dialog.
+    Dialogs must be created on the tk main thread, never on the tray thread."""
+    _switch_account_event.set()
+
+
+def _save_switched_config(username, password, suffix, portal_base, terminal_type, config_path):
+    """Persist new credentials (DPAPI + checksum), replacing the current account.
+    Overwrites the active python config in place when there is one, otherwise the
+    standard %APPDATA% location. Resets cached login params. Returns the path."""
+    global _cached_login_params
+    import hashlib
+    data = {
+        "portal_base": portal_base.rstrip("/"),
+        "username": username,
+        "password_dpapi": dpapi_protect(password),
+        "service_suffix": suffix,
+        "terminal_type": int(terminal_type),
+    }
+    content = json.dumps(data, sort_keys=True, ensure_ascii=False)
+    data["_checksum"] = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    active = _find_config_file(config_path)
+    if active is not None and active.name == "campus_login_py.config.json":
+        save_path = active
+    else:
+        save_path = _USER_CONFIG
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    with save_path.open("w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    _secure_config_file_permissions(save_path)
+    _cached_login_params = None
+    return save_path
+
+
+def _run_switch_account(args):
+    """Show the switch-account dialog on the MAIN (tk) thread, save the new
+    credentials, then make the monitor loop reload and log in with them at once."""
+    from tkinter import simpledialog, messagebox
+    username = simpledialog.askstring(t("switch_title"), t("init_username"), parent=_tk_root)
+    if not username:
+        return
+    password = simpledialog.askstring(t("switch_title"), t("init_password"), show="*", parent=_tk_root)
+    if not password:
+        return
+    suffix = simpledialog.askstring(t("switch_title"), t("init_suffix"), parent=_tk_root)
+    if suffix is None:
+        suffix = ""
+    # Preserve the campus gateway / terminal type from the current config.
+    portal_base = args.portal_base.rstrip("/")
+    terminal_type = getattr(args, "terminal_type", 1)
+    try:
+        current = read_config(args.config)
+        portal_base = str(current.get("portal_base") or portal_base).rstrip("/")
+        terminal_type = int(current.get("terminal_type") or terminal_type)
+    except Exception:
+        pass
+    try:
+        _save_switched_config(username, password, suffix, portal_base, terminal_type, args.config)
+    except Exception as exc:
+        try:
+            messagebox.showerror(t("switch_title"), t("switch_failed", exc), parent=_tk_root)
+        except Exception:
+            pass
+        return
+    write_log(args.log, t("switch_saved", username))
+    # Wake the monitor loop and make it re-read the new credentials immediately.
+    _config_reload_event.set()
+    _network_change_event.set()
+    try:
+        messagebox.showinfo(t("switch_title"), t("switch_done_msg", username), parent=_tk_root)
+    except Exception:
+        pass
+
+
 def _build_menu():
     from pystray import Menu, MenuItem
     _auto_start_checked[0] = is_auto_start_enabled()
     return Menu(
         MenuItem(t("menu_network_status"), _show_network_status),
         MenuItem(t("menu_login_now"), _manual_login),
+        MenuItem(t("menu_switch_account"), _switch_account),
         Menu.SEPARATOR,
         MenuItem(t("menu_auto_start"), _toggle_auto_start, checked=lambda item: _auto_start_checked[0]),
         MenuItem(t("menu_show_log"), show_log_window, default=True),
@@ -3211,6 +3294,16 @@ def run_tray_mode(args):
         failure_state = {"consecutive_failures": 0}
         FAST_INTERVAL = 10  # seconds between checks when network is down
         while True:
+            if _config_reload_event.is_set():
+                _config_reload_event.clear()
+                try:
+                    config = read_config(args.config)
+                    if args.portal_base != DEFAULT_PORTAL:
+                        config["portal_base"] = args.portal_base.rstrip("/")
+                    failure_state["consecutive_failures"] = 0
+                    write_log(args.log, t("account_reloaded"))
+                except Exception as exc:
+                    write_log(args.log, "重载配置失败:{0}: {1}".format(type(exc).__name__, exc))
             try:
                 login_once(config, args, failure_state=failure_state)
             except Exception as exc:
@@ -3245,6 +3338,9 @@ def run_tray_mode(args):
         if _show_log_event.is_set():
             _show_log_event.clear()
             _create_log_window()
+        if _switch_account_event.is_set():
+            _switch_account_event.clear()
+            _run_switch_account(args)
         _tk_root.after(200, check_show_log)
 
     _tk_root.after(200, check_show_log)
