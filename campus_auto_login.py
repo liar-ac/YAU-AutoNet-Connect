@@ -23,7 +23,7 @@ from urllib import parse, request
 
 DEFAULT_PORTAL = "http://10.200.84.3"
 APP_NAME = "YAU-AutoNet-Connect"
-APP_VERSION = "1.4.1"
+APP_VERSION = "1.4.2"
 __version__ = APP_VERSION
 
 # Legacy urllib opener kept for backward compatibility; v1.0.4 core path uses http.client direct.
@@ -928,10 +928,19 @@ def _report_credential_error(args, failure_state, exc):
         failure_state["consecutive_failures"] = failure_state.get("consecutive_failures", 0) + 1
 
 
-def get_timestamped_log_path(base_name="campus_auto_login_py"):
-    """Generate log filename with date: campus_auto_login_py_YYYYMMDD.log"""
-    date_str = time.strftime("%Y%m%d")
-    return SCRIPT_DIR / "{0}_{1}.log".format(base_name, date_str)
+def _cleanup_dated_logs(base_name="campus_auto_login_py"):
+    """Remove old per-day log files (base_YYYYMMDD.log) left by earlier versions.
+    The tool now keeps a single size-capped log instead of one file per day,
+    so these never accumulate. The single base.log and base.log.old are kept."""
+    import glob
+    try:
+        for path in glob.glob(str(SCRIPT_DIR / "{0}_*.log".format(base_name))):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+    except Exception:
+        pass
 
 
 def export_logs_to_zip():
@@ -1000,9 +1009,9 @@ def write_log(log_path, message, level="info"):
     with _log_lock:
         print(line)
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        # 日志轮转：超过 1MB 时归档为 .old
+        # 日志轮转：超过 256KB 归档为 .old(单文件+一个.old,总占用≈0.5MB,永不累积)
         try:
-            if log_path.exists() and log_path.stat().st_size > 1_048_576:
+            if log_path.exists() and log_path.stat().st_size > 262_144:
                 old = log_path.with_suffix(".log.old")
                 old.unlink(missing_ok=True)
                 log_path.rename(old)
@@ -3602,9 +3611,9 @@ def main():
         export_logs_to_zip()
         return 0
 
-    # Use timestamped log file by default
+    # Single size-capped log (no per-day accumulation); clean up old dated logs.
     if args.log == DEFAULT_LOG:
-        args.log = get_timestamped_log_path()
+        _cleanup_dated_logs()
 
     # Handle --show-config-path
     if args.show_config_path:

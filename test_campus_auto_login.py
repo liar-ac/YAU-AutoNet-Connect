@@ -1219,5 +1219,26 @@ class TestSwitchAccount(unittest.TestCase):
             self.assertEqual(data["portal_base"], "http://10.200.84.3")
 
 
+class TestLogCleanup(unittest.TestCase):
+    """单文件日志:旧的按天日志应被清理,单文件 base.log 与 base.log.old 保留。"""
+
+    def test_cleanup_removes_dated_logs_keeps_single(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td)
+            (d / "campus_auto_login_py.log").write_text("keep", encoding="utf-8")
+            (d / "campus_auto_login_py.log.old").write_text("keep-old", encoding="utf-8")
+            (d / "campus_auto_login_py_20260624.log").write_text("dated", encoding="utf-8")
+            (d / "campus_auto_login_py_20260627.log").write_text("dated", encoding="utf-8")
+            with patch.object(campus_module, "SCRIPT_DIR", d):
+                campus_module._cleanup_dated_logs()
+            remaining = sorted(p.name for p in d.glob("*"))
+            self.assertIn("campus_auto_login_py.log", remaining)
+            self.assertIn("campus_auto_login_py.log.old", remaining)
+            self.assertNotIn("campus_auto_login_py_20260624.log", remaining)
+            self.assertNotIn("campus_auto_login_py_20260627.log", remaining)
+
+
 if __name__ == "__main__":
     unittest.main()
