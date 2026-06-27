@@ -23,7 +23,7 @@ from urllib import parse, request
 
 DEFAULT_PORTAL = "http://10.200.84.3"
 APP_NAME = "YAU-AutoNet-Connect"
-APP_VERSION = "1.4.2"
+APP_VERSION = "1.4.3"
 __version__ = APP_VERSION
 
 # Legacy urllib opener kept for backward compatibility; v1.0.4 core path uses http.client direct.
@@ -1446,10 +1446,12 @@ def login_once(config, args, failure_state=None):
 
     if status["state"] == "network_not_ready":
         # Socket-level failure - transient, likely Wi-Fi roaming or network transition
-        # Fast retry: use cached account/IP params, re-derive password from config
-        if _cached_login_params and _cached_login_params.get("portal_base") == config["portal_base"]:
+        # Fast retry: use cached account/IP params, re-derive password from config.
+        # Snapshot the shared global once: a concurrent "switch account" may null it
+        # between the two reads, which would raise AttributeError on the second.
+        cached = _cached_login_params
+        if cached and cached.get("portal_base") == config["portal_base"]:
             try:
-                cached = _cached_login_params
                 # Re-derive password from config (not from cache, for security)
                 fast_password = _decrypt_config_password(config)
                 if fast_password:

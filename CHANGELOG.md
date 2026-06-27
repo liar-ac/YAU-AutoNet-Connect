@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.4.3 (2026-06-27)
+
+### Bug修复
+- 修复一处低概率线程竞态:`login_once` 的快速重试分支对共享全局 `_cached_login_params` 分两次读取(`if _cached_login_params and _cached_login_params.get(...)`),若"切换账号"线程恰好在两次读取之间将其置空,第二次访问会抛 `AttributeError`(虽被监控循环捕获并自恢复,仍属隐患)。改为先快照到本地变量再判断,彻底消除该窗口。
+
 ## v1.4.2 (2026-06-27)
 
 ### 改进
