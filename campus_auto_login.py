@@ -23,7 +23,7 @@ from urllib import parse, request
 
 DEFAULT_PORTAL = "http://10.200.84.3"
 APP_NAME = "YAU-AutoNet-Connect"
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.4.1"
 __version__ = APP_VERSION
 
 # Legacy urllib opener kept for backward compatibility; v1.0.4 core path uses http.client direct.
@@ -711,7 +711,7 @@ _i18n_strings = {
     "diagnose_ok":            {"zh": "多层传输成功: {0}", "en": "Multi-layer transport succeeded: {0}"},
     "diagnose_fail":          {"zh": "多层传输失败: {0}", "en": "Multi-layer transport failed: {0}"},
     # Wi-Fi
-    "wifi_no_connection":     {"zh": "检测到物理网卡但未连接Wi-Fi，尝试主动连接...", "en": "Physical adapter found but no Wi-Fi, attempting connect..."},
+    "wifi_no_connection":     {"zh": "未连接Wi-Fi，主动连接校园网...", "en": "No Wi-Fi connected, connecting to campus..."},
     "wifi_dhcp_wait":         {"zh": "Wi-Fi已连接({0})，等待DHCP分配IP...", "en": "Wi-Fi connected ({0}), waiting for DHCP IP..."},
     "wifi_reconnecting":      {"zh": "正在重连Wi-Fi: {0}", "en": "Reconnecting Wi-Fi: {0}"},
     "wifi_reconnect_ok":      {"zh": "Wi-Fi重连已请求: {0}", "en": "Wi-Fi reconnect requested: {0}"},
@@ -2295,7 +2295,8 @@ def wait_for_network_ready(portal_host="10.200.84.3", portal_port=80,
     deadline = time.time() + timeout_seconds
     consecutive_ok = 0
     first_pass = True
-    wifi_reconnect_attempted = False
+    last_wifi_attempt = 0.0          # last proactive Wi-Fi (re)connect attempt
+    WIFI_RETRY_INTERVAL = 20         # retry reconnect every 20s while disconnected
     dhcp_wait_attempted = False
 
     while time.time() < deadline:
@@ -2308,24 +2309,27 @@ def wait_for_network_ready(portal_host="10.200.84.3", portal_port=80,
         else:
             consecutive_ok = 0
 
-            # Proactive Wi-Fi reconnection on boot if we have physical adapter but portal unreachable
-            if not wifi_reconnect_attempted and boot_elapsed > 0 and boot_elapsed < 300:
-                adapters = _get_physical_adapter_ips()
-                physical = [ip for ip, _, _, _, virt in adapters if not virt]
+            # Proactive Wi-Fi recovery during the boot window.
+            if boot_elapsed > 0 and boot_elapsed < 300:
                 current_ssid = get_current_wifi_ssid()
-
-                # If we have a physical adapter but no Wi-Fi connection or wrong SSID
-                if physical and not current_ssid:
+                now = time.time()
+                # No Wi-Fi connected -> actively connect the campus SSID, retrying
+                # periodically. At cold boot NO adapter has an IP yet, so we must
+                # NOT require a physical adapter here (that was the boot-hang bug),
+                # and the WLAN service/driver is often not ready on the first try.
+                if not current_ssid and (now - last_wifi_attempt) >= WIFI_RETRY_INTERVAL:
                     if log_fn:
                         log_fn(t("wifi_no_connection"))
                     reconnect_campus_wifi(campus_ssid, log_fn=log_fn)
-                    wifi_reconnect_attempted = True
+                    last_wifi_attempt = now
                     # Wait for Wi-Fi to associate
                     time.sleep(5)
                     continue
 
-                # If Wi-Fi is connected but no internal IP yet (DHCP pending)
-                if current_ssid and physical:
+                # Wi-Fi connected but no internal IP yet (DHCP pending)
+                if current_ssid:
+                    adapters = _get_physical_adapter_ips()
+                    physical = [ip for ip, _, _, _, virt in adapters if not virt]
                     has_internal_ip = any(_is_private_ip(ip) for ip in physical)
                     if not has_internal_ip and not dhcp_wait_attempted:
                         if log_fn:

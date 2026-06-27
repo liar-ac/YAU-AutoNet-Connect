@@ -824,6 +824,24 @@ class TestWaitForNetworkReadyEnhanced(unittest.TestCase):
             self.assertTrue(result)
             mock_reconnect.assert_called_once()
 
+    def test_reconnects_at_boot_with_no_adapter_and_no_ssid(self):
+        """Real boot-hang bug: at cold boot NO adapter has an IP yet and no SSID
+        is connected — a campus Wi-Fi reconnect MUST still be attempted. The old
+        code skipped it because it required a physical adapter IP to exist first."""
+        with patch("campus_auto_login.network_ready", side_effect=[False, False, True]), \
+             patch("campus_auto_login._seconds_since_boot", return_value=30), \
+             patch("campus_auto_login._has_physical_adapter", return_value=False), \
+             patch("campus_auto_login._get_physical_adapter_ips", return_value=[]), \
+             patch("campus_auto_login.get_current_wifi_ssid", return_value=""), \
+             patch("campus_auto_login.time.sleep"), \
+             patch("campus_auto_login.reconnect_campus_wifi", return_value=True) as mock_reconnect:
+            result = campus_module.wait_for_network_ready(
+                portal_host="10.200.84.3", timeout_seconds=30,
+                check_interval=1, stable_seconds=1, campus_ssid="YADX-STU")
+            self.assertTrue(result)
+            mock_reconnect.assert_called()  # reconnect despite NO physical adapter
+            self.assertEqual(mock_reconnect.call_args[0][0], "YADX-STU")
+
     def test_waits_for_dhcp_when_wifi_connected_but_no_internal_ip(self):
         """Should wait for DHCP when Wi-Fi is connected but no internal IP yet."""
         with patch("campus_auto_login.network_ready", side_effect=[False, False, True]), \
