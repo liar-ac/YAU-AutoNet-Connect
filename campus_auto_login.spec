@@ -3,7 +3,9 @@
 _EXCLUDES = [
     # numpy (biggest win, pulled in by PIL but not needed for Image/ImageDraw)
     'numpy',
-    # unused PIL image format plugins (keep Ico/Png/Bmp for pystray icon)
+    # unused PIL image format plugins/helpers (tray icon is generated in memory)
+    'PIL.ImageDraw', 'PIL.ImageDraw2', 'PIL.ImageFont', 'PIL.ImageCms',
+    'PIL._imagingft', 'PIL._imagingcms',
     'PIL.BlpImagePlugin', 'PIL.BufrStubImagePlugin', 'PIL.CurImagePlugin',
     'PIL.DcxImagePlugin', 'PIL.DdsImagePlugin', 'PIL.EpsImagePlugin',
     'PIL.FitsStubImagePlugin', 'PIL.FliImagePlugin', 'PIL.FpxImagePlugin',
@@ -40,7 +42,7 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[],
-    hiddenimports=['pystray', 'pystray._win32', 'PIL', 'PIL.Image', 'PIL.ImageDraw', 'tkinter', 'tkinter.scrolledtext', 'tkinter.simpledialog', 'tkinter.messagebox', 'tempfile'],
+    hiddenimports=['pystray', 'pystray._win32', 'PIL', 'PIL.Image', 'tkinter', 'tkinter.scrolledtext', 'tkinter.simpledialog', 'tkinter.messagebox', 'tempfile'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

@@ -23,7 +23,7 @@ from urllib import parse, request
 
 DEFAULT_PORTAL = "http://10.200.84.3"
 APP_NAME = "YAU-AutoNet-Connect"
-APP_VERSION = "1.4.3"
+APP_VERSION = "1.4.4"
 __version__ = APP_VERSION
 
 # Legacy urllib opener kept for backward compatibility; v1.0.4 core path uses http.client direct.
@@ -2203,10 +2203,13 @@ def interruptible_sleep(seconds, log_fn=None):
 BOOT_GRACE_SECONDS = 30  # brief wait after boot; wait_for_network_ready handles the rest
 # Network readiness logging state (avoid spamming logs)
 _network_ready_logged = False
+_boot_time_cache = [None]
 
 
 def _get_system_boot_time():
     """Return the Unix timestamp of the last Windows boot (best-effort)."""
+    if _boot_time_cache[0] is not None:
+        return _boot_time_cache[0]
     try:
         out = _run_powershell_hidden(
             '(Get-CimInstance Win32_OperatingSystem).LastBootUpTime | '
@@ -2216,9 +2219,11 @@ def _get_system_boot_time():
         for line in out.splitlines():
             val = line.strip()
             if val.isdigit():
-                return int(val)
+                _boot_time_cache[0] = int(val)
+                return _boot_time_cache[0]
     except Exception:
         pass
+    _boot_time_cache[0] = 0
     return 0
 
 
@@ -2251,17 +2256,19 @@ def network_ready(portal_host="10.200.84.3", portal_port=80, log_fn=None):
     """
     global _network_ready_logged
     details = []
+    should_collect_details = log_fn is not None
 
-    # Info: adapter status (non-blocking, for diagnostics only)
-    adapters = _get_physical_adapter_ips()
-    physical = [(ip, ifidx, name, desc) for ip, ifidx, name, desc, virt in adapters if not virt]
-    if not physical:
-        details.append("等待物理网卡就绪...")
+    if should_collect_details:
+        # Info: adapter status (non-blocking, for diagnostics only)
+        adapters = _get_physical_adapter_ips()
+        physical = [(ip, ifidx, name, desc) for ip, ifidx, name, desc, virt in adapters if not virt]
+        if not physical:
+            details.append("等待物理网卡就绪...")
 
-    # Info: default gateway (non-blocking)
-    gw = _get_default_gateway()
-    if gw:
-        details.append("网关: {0}".format(gw))
+        # Info: default gateway (non-blocking)
+        gw = _get_default_gateway()
+        if gw:
+            details.append("网关: {0}".format(gw))
 
     # PRIMARY CHECK: TCP connect to portal
     try:
@@ -2274,7 +2281,7 @@ def network_ready(portal_host="10.200.84.3", portal_port=80, log_fn=None):
         ok = False
 
     # Log on first call or state change
-    if not _network_ready_logged or not ok:
+    if should_collect_details and (not _network_ready_logged or not ok):
         if log_fn:
             for d in details:
                 log_fn(d)
@@ -2873,12 +2880,28 @@ def hide_console_window():
 
 
 def create_tray_icon_image():
-    """Generate a simple 64x64 tray icon image using PIL."""
-    from PIL import Image, ImageDraw
-    img = Image.new("RGBA", (64, 64), (0, 120, 212, 255))
-    draw = ImageDraw.Draw(img)
-    draw.rounded_rectangle([8, 8, 56, 56], radius=8, fill=(255, 255, 255, 230))
-    draw.text((20, 14), "N", fill=(0, 120, 212, 255))
+    """Generate a simple 64x64 tray icon image using only PIL.Image."""
+    from PIL import Image
+    size = 64
+    radius = 8
+    img = Image.new("RGBA", (size, size), (0, 120, 212, 255))
+    pixels = img.load()
+
+    # Draw a rounded white tile and a lightweight "N" mark without ImageDraw.
+    for y in range(8, 56):
+        for x in range(8, 56):
+            dx = min(x - 8, 55 - x)
+            dy = min(y - 8, 55 - y)
+            if dx >= radius or dy >= radius or (dx - radius) ** 2 + (dy - radius) ** 2 <= radius ** 2:
+                pixels[x, y] = (255, 255, 255, 230)
+    for y in range(18, 47):
+        for x in range(21, 26):
+            pixels[x, y] = (0, 120, 212, 255)
+        for x in range(38, 43):
+            pixels[x, y] = (0, 120, 212, 255)
+        diag = 22 + int((y - 18) * 17 / 28)
+        for x in range(diag, min(diag + 5, 43)):
+            pixels[x, y] = (0, 120, 212, 255)
     return img
 
 

@@ -924,6 +924,48 @@ class TestWaitForNetworkReadyEnhanced(unittest.TestCase):
             mock_reconnect.assert_not_called()
 
 
+class TestNetworkReadyPerformance(unittest.TestCase):
+    """Performance guardrails for boot/network readiness polling."""
+
+    def setUp(self):
+        self._saved_boot_cache = campus_module._boot_time_cache[0]
+        self._saved_ready_logged = campus_module._network_ready_logged
+        campus_module._boot_time_cache[0] = None
+        campus_module._network_ready_logged = False
+
+    def tearDown(self):
+        campus_module._boot_time_cache[0] = self._saved_boot_cache
+        campus_module._network_ready_logged = self._saved_ready_logged
+
+    @patch("campus_auto_login._run_powershell_hidden", return_value="123456\n")
+    def test_boot_time_is_cached(self, mock_ps):
+        self.assertEqual(campus_module._get_system_boot_time(), 123456)
+        self.assertEqual(campus_module._get_system_boot_time(), 123456)
+        mock_ps.assert_called_once()
+
+    @patch("campus_auto_login.socket.create_connection")
+    @patch("campus_auto_login._get_default_gateway")
+    @patch("campus_auto_login._get_physical_adapter_ips")
+    def test_network_ready_skips_diagnostics_without_log_fn(self, mock_ips, mock_gw, mock_socket):
+        mock_socket.return_value = MagicMock()
+        self.assertTrue(campus_module.network_ready("10.200.84.3", log_fn=None))
+        mock_ips.assert_not_called()
+        mock_gw.assert_not_called()
+
+    @patch("campus_auto_login.socket.create_connection")
+    @patch("campus_auto_login._get_default_gateway", return_value="10.211.0.1")
+    @patch("campus_auto_login._get_physical_adapter_ips", return_value=[
+        ("10.211.223.248", "6", "WLAN", "Wi-Fi Adapter", False)
+    ])
+    def test_network_ready_collects_diagnostics_with_log_fn(self, mock_ips, mock_gw, mock_socket):
+        mock_socket.return_value = MagicMock()
+        messages = []
+        self.assertTrue(campus_module.network_ready("10.200.84.3", log_fn=messages.append))
+        mock_ips.assert_called_once()
+        mock_gw.assert_called_once()
+        self.assertTrue(any("portal TCP可达" in msg for msg in messages))
+
+
 class TestIsPrivateIP(unittest.TestCase):
     """Test RFC 1918 private IP detection."""
 
