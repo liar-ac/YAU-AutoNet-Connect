@@ -232,7 +232,7 @@ pip install -r requirements-dev.txt
 
 ```powershell
 pip install -r requirements-dev.txt
-python -m pytest test_campus_auto_login.py -q
+python -m pytest test_campus_auto_login.py test_integration.py -q
 pyinstaller campus_auto_login.spec
 ```
 
@@ -249,6 +249,12 @@ python watch_build.py
 ```
 
 > UPX 是可选的 exe 压缩工具。PyInstaller 检测到 UPX 时会自动启用，未安装时打包正常进行，仅体积略大。
+
+发布前后可校验本地 exe、git tag 和 GitHub Release 附件是否完全一致：
+
+```powershell
+python verify_release.py v1.4.5
+```
 
 ---
 

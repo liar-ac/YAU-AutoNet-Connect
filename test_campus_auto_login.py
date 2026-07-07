@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Lightweight tests for campus_auto_login (no network required)."""
 import os
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -28,6 +29,7 @@ from campus_auto_login import (
     normalize_interval,
     open_direct,
     query_string,
+    recovery_check_interval,
     reconnect_campus_wifi,
     wait_for_portal_ready,
     __version__,
@@ -46,6 +48,53 @@ class TestVersion(unittest.TestCase):
     def test_version_string(self):
         self.assertIsInstance(__version__, str)
         self.assertRegex(__version__, r"^\d+\.\d+\.\d+$")
+
+
+class TestWindowedCliOutput(unittest.TestCase):
+    def test_version_exits_cleanly_without_stdout(self):
+        with patch.object(campus_module.sys, "argv", ["campus_auto_login.exe", "--version"]), \
+             patch.object(campus_module.sys, "stdout", None), \
+             patch.object(campus_module.sys, "frozen", True, create=True), \
+             patch("campus_auto_login.write_log") as mock_log:
+            self.assertEqual(campus_module.main(), 0)
+        mock_log.assert_called_once()
+        self.assertIn("YAU-AutoNet-Connect", mock_log.call_args[0][1])
+
+    def test_help_exits_cleanly_without_stdout(self):
+        with patch.object(campus_module.sys, "argv", ["campus_auto_login.exe", "--help"]), \
+             patch.object(campus_module.sys, "stdout", None), \
+             patch.object(campus_module.sys, "frozen", True, create=True), \
+             patch("campus_auto_login.write_log") as mock_log:
+            self.assertEqual(campus_module.main(), 0)
+        mock_log.assert_called_once()
+        self.assertIn("--tray", mock_log.call_args[0][1])
+
+    def test_write_log_tolerates_missing_stdout(self):
+        with patch.object(campus_module.sys, "stdout", None), \
+             patch.object(campus_module._log_queue, "put_nowait"):
+            campus_module.write_log(Path("NUL"), "no stdout")
+
+    def test_show_config_path_tolerates_missing_stdout(self):
+        with patch.object(campus_module.sys, "argv", ["campus_auto_login.exe", "--show-config-path"]), \
+             patch.object(campus_module.sys, "stdout", None), \
+             patch.object(campus_module.sys, "frozen", True, create=True), \
+             patch("campus_auto_login._find_config_file", return_value=None), \
+             patch("campus_auto_login.write_log") as mock_log:
+            self.assertEqual(campus_module.main(), 0)
+        self.assertGreaterEqual(mock_log.call_count, 1)
+        self.assertIn("未找到配置文件", mock_log.call_args_list[0][0][1])
+
+    def test_export_logs_tolerates_missing_stdout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            empty_dir = Path(tmp)
+            with patch.object(campus_module.sys, "stdout", None), \
+                 patch.object(campus_module.sys, "frozen", True, create=True), \
+                 patch.object(campus_module, "SCRIPT_DIR", empty_dir), \
+                 patch("campus_auto_login._user_data_dir", return_value=empty_dir), \
+                 patch("campus_auto_login.write_log") as mock_log:
+                self.assertIsNone(campus_module.export_logs_to_zip())
+        mock_log.assert_called_once()
+        self.assertIn("未找到日志文件", mock_log.call_args[0][1])
 
 
 class TestJsonpToObj(unittest.TestCase):
@@ -96,6 +145,17 @@ class TestNormalizeInterval(unittest.TestCase):
 
     def test_just_below_min(self):
         self.assertEqual(normalize_interval(4), 5)
+
+
+class TestRecoveryCheckInterval(unittest.TestCase):
+    def test_stable_state_uses_normal_interval(self):
+        self.assertIsNone(recovery_check_interval(0))
+
+    def test_fast_bounded_recovery_backoff(self):
+        self.assertEqual(recovery_check_interval(1), 2)
+        self.assertEqual(recovery_check_interval(2), 5)
+        self.assertEqual(recovery_check_interval(3), 10)
+        self.assertEqual(recovery_check_interval(99), 10)
 
 
 class TestEportalLoginUrl(unittest.TestCase):
@@ -346,6 +406,14 @@ class TestTestPortalCandidate(unittest.TestCase):
 
 
 class TestGetDefaultGateway(unittest.TestCase):
+    def setUp(self):
+        self._saved_cache = dict(campus_module._runtime_cache)
+        campus_module._invalidate_network_runtime_cache()
+
+    def tearDown(self):
+        campus_module._runtime_cache.clear()
+        campus_module._runtime_cache.update(self._saved_cache)
+
     @patch("campus_auto_login.subprocess.run")
     def test_parses_gateway(self, mock_run):
         mock_run.return_value = MagicMock(
@@ -360,6 +428,25 @@ class TestGetDefaultGateway(unittest.TestCase):
     def test_returns_none_on_failure(self, mock_run):
         mock_run.side_effect = Exception("fail")
         self.assertIsNone(_get_default_gateway())
+
+    @patch("campus_auto_login.subprocess.run")
+    def test_gateway_is_cached_until_invalidated(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=b"10.211.223.1\n",
+            stderr=b"",
+        )
+        self.assertEqual(_get_default_gateway(), "10.211.223.1")
+        self.assertEqual(_get_default_gateway(), "10.211.223.1")
+        mock_run.assert_called_once()
+
+        campus_module._invalidate_network_runtime_cache()
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=b"10.211.223.254\n",
+            stderr=b"",
+        )
+        self.assertEqual(_get_default_gateway(), "10.211.223.254")
 
 
 class TestGetGatewaySubnetCandidates(unittest.TestCase):
@@ -930,12 +1017,18 @@ class TestNetworkReadyPerformance(unittest.TestCase):
     def setUp(self):
         self._saved_boot_cache = campus_module._boot_time_cache[0]
         self._saved_ready_logged = campus_module._network_ready_logged
+        self._saved_runtime_cache = dict(campus_module._runtime_cache)
+        self._saved_preferred_source = campus_module._preferred_source_ip[0]
         campus_module._boot_time_cache[0] = None
         campus_module._network_ready_logged = False
+        campus_module._invalidate_network_runtime_cache()
 
     def tearDown(self):
         campus_module._boot_time_cache[0] = self._saved_boot_cache
         campus_module._network_ready_logged = self._saved_ready_logged
+        campus_module._runtime_cache.clear()
+        campus_module._runtime_cache.update(self._saved_runtime_cache)
+        campus_module._preferred_source_ip[0] = self._saved_preferred_source
 
     @patch("campus_auto_login._run_powershell_hidden", return_value="123456\n")
     def test_boot_time_is_cached(self, mock_ps):
@@ -964,6 +1057,39 @@ class TestNetworkReadyPerformance(unittest.TestCase):
         mock_ips.assert_called_once()
         mock_gw.assert_called_once()
         self.assertTrue(any("portal TCP可达" in msg for msg in messages))
+
+    @patch("campus_auto_login._run_powershell_hidden")
+    def test_adapter_ips_are_cached_until_network_event(self, mock_ps):
+        mock_ps.return_value = (
+            "10.211.223.248|6|WLAN|Intel Wi-Fi\n"
+        )
+        first = campus_module._get_physical_adapter_ips()
+        second = campus_module._get_physical_adapter_ips()
+        self.assertEqual(first, second)
+        mock_ps.assert_called_once()
+
+        campus_module._invalidate_network_runtime_cache()
+        mock_ps.return_value = "10.211.223.249|6|WLAN|Intel Wi-Fi\n"
+        refreshed = campus_module._get_physical_adapter_ips()
+        self.assertEqual(refreshed[0][0], "10.211.223.249")
+
+    @patch("campus_auto_login._run_powershell_hidden")
+    def test_empty_adapter_ips_are_not_cached_during_cold_boot(self, mock_ps):
+        mock_ps.side_effect = [
+            "",
+            "10.211.223.248|6|WLAN|Intel Wi-Fi\n",
+        ]
+        self.assertEqual(campus_module._get_physical_adapter_ips(), [])
+        refreshed = campus_module._get_physical_adapter_ips()
+        self.assertEqual(refreshed[0][0], "10.211.223.248")
+        self.assertEqual(mock_ps.call_count, 2)
+
+    def test_invalidate_network_cache_drops_preferred_source_ip(self):
+        campus_module._preferred_source_ip[0] = ("10.211.223.248", "6", "WLAN")
+        campus_module._runtime_cache_set("adapter_ips", (("10.211.223.248", "6", "WLAN", "Intel", False),))
+        campus_module._invalidate_network_runtime_cache()
+        self.assertIsNone(campus_module._preferred_source_ip[0])
+        self.assertIsNone(campus_module._runtime_cache_get("adapter_ips"))
 
 
 class TestIsPrivateIP(unittest.TestCase):
@@ -1158,6 +1284,18 @@ class TestAutoStartRobustness(unittest.TestCase):
         # sys.frozen is False under pytest -> must not touch the registry
         campus_module.ensure_auto_start_healthy()
         m_set.assert_not_called()
+
+    @patch("campus_auto_login._is_startup_approved_disabled", return_value=True)
+    @patch("campus_auto_login.set_auto_start")
+    @patch("campus_auto_login._read_autostart_entry")
+    @patch("campus_auto_login._get_autostart_optout", return_value=False)
+    def test_healthy_logs_task_manager_disabled_entry(self, m_opt, m_read, m_set, m_sa):
+        messages = []
+        with patch.object(campus_module.sys, "frozen", True, create=True):
+            m_read.return_value = campus_module._autostart_command()
+            campus_module.ensure_auto_start_healthy(log_fn=messages.append)
+        m_set.assert_not_called()
+        self.assertTrue(any("任务管理器" in msg or "Task Manager" in msg for msg in messages))
 
 
 class TestEventDrivenDetection(unittest.TestCase):

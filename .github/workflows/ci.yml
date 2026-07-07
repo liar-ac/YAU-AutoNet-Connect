@@ -31,5 +31,8 @@ jobs:
       - name: Check watch_build syntax
         run: python -m py_compile watch_build.py
 
+      - name: Check release verifier syntax
+        run: python -m py_compile verify_release.py
+
       - name: Run tests
-        run: python -m pytest test_campus_auto_login.py -q
+        run: python -m pytest test_campus_auto_login.py test_integration.py -q

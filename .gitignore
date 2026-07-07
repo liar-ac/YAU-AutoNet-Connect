@@ -21,6 +21,8 @@ dist/
 # 开发工具
 .playwright-cli/
 .claude/
+.agents/
+.codex/
 
 # 数据文件
 *.har

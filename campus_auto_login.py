@@ -23,7 +23,7 @@ from urllib import parse, request
 
 DEFAULT_PORTAL = "http://10.200.84.3"
 APP_NAME = "YAU-AutoNet-Connect"
-APP_VERSION = "1.4.4"
+APP_VERSION = "1.4.5"
 __version__ = APP_VERSION
 
 # Legacy urllib opener kept for backward compatibility; v1.0.4 core path uses http.client direct.
@@ -127,6 +127,30 @@ _VIRTUAL_KEYWORDS_NET = [
 _VIRTUAL_IP_PREFIXES = ("198.18.", "198.19.", "169.254.", "127.")
 
 _preferred_source_ip = [None]  # cached after first successful interface-bound connection
+_RUNTIME_CACHE_TTL_SECONDS = 20
+_runtime_cache = {
+    "adapter_ips": (0.0, None),
+    "default_gateway": (0.0, None),
+}
+
+
+def _runtime_cache_get(name):
+    ts, value = _runtime_cache.get(name, (0.0, None))
+    if value is not None and time.time() - ts <= _RUNTIME_CACHE_TTL_SECONDS:
+        return value
+    return None
+
+
+def _runtime_cache_set(name, value):
+    _runtime_cache[name] = (time.time(), value)
+    return value
+
+
+def _invalidate_network_runtime_cache():
+    """Drop short-lived network hints after an OS network-change event."""
+    for key in list(_runtime_cache):
+        _runtime_cache[key] = (0.0, None)
+    _preferred_source_ip[0] = None
 
 
 def _is_virtual_ip(ip):
@@ -179,6 +203,9 @@ def _run_powershell_hidden(script, timeout=15):
 def _get_physical_adapter_ips():
     """Get IPv4 addresses from physical network adapters, excluding virtual ones.
     Returns list of (ip_address, ifIndex, alias, description) tuples."""
+    cached = _runtime_cache_get("adapter_ips")
+    if cached is not None:
+        return list(cached)
     results = []
     try:
         out = _run_powershell_hidden(
@@ -199,6 +226,10 @@ def _get_physical_adapter_ips():
             results.append((ip, ifidx, name, desc, is_virtual))
     except Exception:
         pass
+    # Do not cache an empty adapter list: during cold boot, WLAN/DHCP can become
+    # ready seconds later and stale emptiness would delay reconnect progress.
+    if results:
+        _runtime_cache_set("adapter_ips", tuple(results))
     return results
 
 
@@ -657,6 +688,30 @@ _log_lock = threading.Lock()
 _log_level = "info"  # Global log level: debug|info|warning|error
 _LOG_LEVELS = {"debug": 0, "info": 1, "warning": 2, "error": 3}
 
+
+def _safe_stdout_write(message):
+    """Best-effort stdout write; windowed exe builds may have no console."""
+    stream = getattr(sys, "stdout", None)
+    if stream is None:
+        return False
+    try:
+        text = str(message)
+        if not text.endswith("\n"):
+            text += "\n"
+        stream.write(text)
+        try:
+            stream.flush()
+        except Exception:
+            pass
+        return True
+    except Exception:
+        return False
+
+
+def _emit_cli_message(message, log_path=DEFAULT_LOG):
+    if not _safe_stdout_write(message) and getattr(sys, "frozen", False):
+        write_log(log_path, str(message).rstrip())
+
 # ---------------------------------------------------------------------------
 # i18n — lightweight translation framework
 # Default language is "zh"; all existing output preserved when not switched.
@@ -966,7 +1021,7 @@ def export_logs_to_zip():
                 config_files.append(str(config_path))
 
     if not log_files and not config_files:
-        print("未找到日志文件")
+        _emit_cli_message("未找到日志文件")
         return None
 
     with zipfile.ZipFile(str(zip_path), 'w', zipfile.ZIP_DEFLATED) as zf:
@@ -989,7 +1044,7 @@ def export_logs_to_zip():
             except Exception:
                 pass
 
-    print("日志已导出到: {0}".format(zip_path))
+    _emit_cli_message("日志已导出到: {0}".format(zip_path))
     return zip_path
 
 
@@ -1007,7 +1062,7 @@ def write_log(log_path, message, level="info"):
         message
     )
     with _log_lock:
-        print(line)
+        _safe_stdout_write(line)
         log_path.parent.mkdir(parents=True, exist_ok=True)
         # 日志轮转：超过 256KB 归档为 .old(单文件+一个.old,总占用≈0.5MB,永不累积)
         try:
@@ -1624,9 +1679,9 @@ def check_only(args):
     return 1
 
 
-def parse_args():
+def build_arg_parser():
     parser = argparse.ArgumentParser(description="Campus network auto login for Dr.COM portal.")
-    parser.add_argument("--version", action="version", version="{0} {1}".format(APP_NAME, APP_VERSION))
+    parser.add_argument("--version", action="store_true", help="Show version and exit.")
     parser.add_argument("--init", action="store_true", help="Create encrypted config.")
     parser.add_argument("--once", action="store_true", help="Check once and login if offline.")
     parser.add_argument("--check", action="store_true", help="Only check portal status.")
@@ -1656,6 +1711,11 @@ def parse_args():
                         help="Show config file path and exit.")
     parser.add_argument("--reset-config", action="store_true",
                         help="Delete all config files (local and user directory) and exit.")
+    return parser
+
+
+def parse_args():
+    parser = build_arg_parser()
     return parser.parse_args()
 
 
@@ -2124,6 +2184,17 @@ def normalize_interval(seconds):
     return seconds
 
 
+_RECOVERY_INTERVALS = (2, 5, 10)
+
+
+def recovery_check_interval(consecutive_failures):
+    """Fast-but-bounded polling cadence while recovering from network failure."""
+    if consecutive_failures <= 0:
+        return None
+    index = min(consecutive_failures, len(_RECOVERY_INTERVALS)) - 1
+    return _RECOVERY_INTERVALS[index]
+
+
 # ---------------------------------------------------------------------------
 # Event-driven network change detection (instant drop/reconnect reaction)
 # ---------------------------------------------------------------------------
@@ -2167,6 +2238,7 @@ def _network_change_watcher():
             # Wait for a change, polling the stop flag each second for clean exit.
             while not _network_watcher_stop.is_set():
                 if kernel32.WaitForSingleObject(overlapped.hEvent, 1000) == WAIT_OBJECT_0:
+                    _invalidate_network_runtime_cache()
                     _network_change_event.set()
                     break
         finally:
@@ -2428,6 +2500,9 @@ def _test_portal_candidate(base_url, timeout=3):
 
 def _get_default_gateway():
     """Get the default gateway IP (read-only, best-effort)."""
+    cached = _runtime_cache_get("default_gateway")
+    if cached is not None:
+        return cached
     try:
         output = _run_powershell_hidden(
             'Get-NetRoute -AddressFamily IPv4 -DestinationPrefix \'0.0.0.0/0\' -ErrorAction SilentlyContinue | '
@@ -2437,7 +2512,7 @@ def _get_default_gateway():
         for line in output.splitlines():
             gw = line.strip()
             if gw and gw != "0.0.0.0" and re.match(r"^\d{1,3}(?:\.\d{1,3}){3}$", gw):
-                return gw
+                return _runtime_cache_set("default_gateway", gw)
     except Exception:
         pass
     try:
@@ -2447,7 +2522,7 @@ def _get_default_gateway():
             if len(parts) >= 3 and parts[0] == "0.0.0.0":
                 gw = parts[2]
                 if gw and gw != "0.0.0.0":
-                    return gw
+                    return _runtime_cache_set("default_gateway", gw)
     except Exception:
         pass
     return None
@@ -3330,7 +3405,6 @@ def run_tray_mode(args):
             write_log(args.log, t("portal_discovered", discovered))
             config["portal_base"] = discovered
         failure_state = {"consecutive_failures": 0}
-        FAST_INTERVAL = 10  # seconds between checks when network is down
         while True:
             if _config_reload_event.is_set():
                 _config_reload_event.clear()
@@ -3346,11 +3420,9 @@ def run_tray_mode(args):
                 login_once(config, args, failure_state=failure_state)
             except Exception as exc:
                 write_log(args.log, t("monitor_error", exc, args.interval))
-            # Dynamic interval: fast when recovering, normal when stable
-            if failure_state["consecutive_failures"] > 0:
-                sleep_time = FAST_INTERVAL
-            else:
-                sleep_time = args.interval
+            # Dynamic interval: quick recovery probes, normal cadence when stable.
+            sleep_time = recovery_check_interval(
+                failure_state["consecutive_failures"]) or args.interval
             # Wait up to sleep_time, but wake instantly on an OS network change
             # (Wi-Fi drop/reconnect/DHCP); wake-from-system-sleep detection kept.
             wall_start = time.time()
@@ -3400,21 +3472,21 @@ def run_tray_mode(args):
 def _cmd_show_config_path(args):
     config_file = _find_config_file(args.config)
     if config_file:
-        print(t("config_show_path", config_file))
+        _emit_cli_message(t("config_show_path", config_file), args.log)
     else:
-        print(t("config_not_found"))
-        print(t("config_search_title"))
-        print(t("config_search_exe", SCRIPT_DIR))
-        print(t("config_search_parent", SCRIPT_DIR.parent))
-        print(t("config_search_cwd", Path.cwd()))
-        print(t("config_search_appdata", _user_data_dir()))
+        _emit_cli_message(t("config_not_found"), args.log)
+        _emit_cli_message(t("config_search_title"), args.log)
+        _emit_cli_message(t("config_search_exe", SCRIPT_DIR), args.log)
+        _emit_cli_message(t("config_search_parent", SCRIPT_DIR.parent), args.log)
+        _emit_cli_message(t("config_search_cwd", Path.cwd()), args.log)
+        _emit_cli_message(t("config_search_appdata", _user_data_dir()), args.log)
     return 0
 
 
 def _cmd_reset_config(args):
     response = input(t("config_reset_confirm")).strip().lower()
     if response != "yes":
-        print(t("config_reset_cancelled"))
+        _emit_cli_message(t("config_reset_cancelled"), args.log)
         return 0
     deleted = []
     # Search all possible config locations
@@ -3426,7 +3498,7 @@ def _cmd_reset_config(args):
                     config_path.unlink()
                     deleted.append(str(config_path))
                 except Exception as e:
-                    print(t("delete_failed", config_path, e))
+                    _emit_cli_message(t("delete_failed", config_path, e), args.log)
     # Also delete route cache
     cache_file = Path("campus_route_cache.json")
     if cache_file.exists():
@@ -3436,11 +3508,11 @@ def _cmd_reset_config(args):
         except Exception:
             pass
     if deleted:
-        print(t("config_reset_deleted"))
+        _emit_cli_message(t("config_reset_deleted"), args.log)
         for p in deleted:
-            print("  {0}".format(p))
+            _emit_cli_message("  {0}".format(p), args.log)
     else:
-        print(t("config_reset_none"))
+        _emit_cli_message(t("config_reset_none"), args.log)
     return 0
 
 
@@ -3585,7 +3657,6 @@ def _run_foreground_loop(args, requested_interval):
         )
     write_log(args.log, t("started_monitoring", args.interval))
     failure_state = {"consecutive_failures": 0}
-    FAST_INTERVAL = 10
     MAX_LOOP_RESTARTS = 10
     SLOW_RETRY = 60
     restart_count = 0
@@ -3596,10 +3667,8 @@ def _run_foreground_loop(args, requested_interval):
                     login_once(config, args, failure_state=failure_state)
                 except Exception as exc:
                     write_log(args.log, t("monitor_error", exc, args.interval))
-                if failure_state["consecutive_failures"] > 0:
-                    sleep_time = FAST_INTERVAL
-                else:
-                    sleep_time = args.interval
+                sleep_time = recovery_check_interval(
+                    failure_state["consecutive_failures"]) or args.interval
                 wall_start = time.time()
                 interruptible_sleep(sleep_time, log_fn=lambda msg: write_log(args.log, msg))
                 wall_elapsed = time.time() - wall_start
@@ -3617,7 +3686,14 @@ def _run_foreground_loop(args, requested_interval):
 
 
 def main():
+    if any(arg in ("-h", "--help") for arg in sys.argv[1:]):
+        _emit_cli_message(build_arg_parser().format_help())
+        return 0
     args = parse_args()
+
+    if args.version:
+        _emit_cli_message("{0} {1}".format(APP_NAME, APP_VERSION), args.log)
+        return 0
 
     # Set UTF-8 output for Windows console
     if sys.platform == "win32":

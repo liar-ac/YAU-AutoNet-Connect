@@ -35,6 +35,10 @@ _EXCLUDES = [
     'sqlite3', 'lib2to3', 'pydoc_data', 'http.server',
     'pdb', 'profile', 'cProfile', 'pstats', 'tabnanny',
     'turtle', 'turtledemo', 'curses', 'ensurepip', 'venv',
+    # pystray pulls non-Windows backends through dynamic backend selection.
+    # This Windows-only exe needs only pystray._win32.
+    'pystray._appindicator', 'pystray._darwin', 'pystray._gtk',
+    'pystray._xorg', 'pystray._util.gtk', 'pystray._util.notify_dbus',
 ]
 
 a = Analysis(
@@ -63,7 +67,7 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    upx_exclude=[],
+    upx_exclude=['api-ms-win-*.dll'],
     runtime_tmpdir=None,
     console=False,
     disable_windowed_traceback=False,
